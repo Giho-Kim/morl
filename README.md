@@ -1,0 +1,216 @@
+# D-LEVER with conditional SF-SAC — four MO benchmarks
+
+기존 SF Double-Q 구현을 conditional SF-SAC로 변경한 모델 프리 실험 코드입니다.
+네 환경 모두 actor `pi(a|s,z)`와 twin SF critics `psi_i(s,a,z)`를 학습합니다.
+환경마다 별개의 conditional model을 학습하며, 한 환경 내 모든 z가 모델을 공유합니다.
+
+| CLI 환경 | 공식 환경 ID | 행동 / actor | 보상 차원 | 기본 steps |
+|---|---|---|---:|---:|
+| `fruit_tree` | `fruit-tree-v0` | 이산 2 / categorical | 6 | 200,000 |
+| `minecart` | `minecart-v0` | 이산 6 / categorical | 3 | 2,000,000 |
+| `mo_hopper` | `mo-hopper-v5` | 연속 3 / tanh Gaussian | 3 | 1,000,000 |
+| `mo_ant` | `mo-ant-v5` | 연속 8 / tanh Gaussian | 3 | 1,000,000 |
+
+Four-Room은 네 환경 구성에서 제외했습니다. Hopper/Ant는 공식 3-objective v5입니다.
+Fruit Tree 영양소 벡터를 그대로 쓰며, leaf one-hot reward로 바꾸지 않습니다.
+
+## 설치와 실행
+
+**Python 3.12**에서 검증했습니다. 예:
+
+```bash
+conda create -n dlever-sfsac python=3.12 -y
+conda activate dlever-sfsac
+cd dlever_bench
+python -m pip install --upgrade pip
+# CPU 버전. GPU 사용 시 이 줄 대신 해당 시스템에 맞는 PyTorch 2.6.0 설치.
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
+python -m pytest -q
+python run_suite.py --smoke --seeds 0 --output smoke_sfsac
+```
+
+MuJoCo Python 패키지는 requirements에 포함됩니다. 별도 MuJoCo license나 rendering은
+필요하지 않습니다. Linux에서 `libGL.so.1` 관련 import 오류가 있으면 시스템 `libgl1`이 필요합니다.
+
+**네 환경 × Uniform/D-LEVER × 5 seeds:**
+
+```bash
+python run_suite.py --seeds 0 1 2 3 4 --output runs_sfsac
+```
+
+개별 실행 / 추가 ablation:
+
+```bash
+python train.py --env mo_ant --method d --seed 0 --output ant_runs
+python run_suite.py --methods uniform d a e --seeds 0 1 2 3 4 --output all_methods
+python run_suite.py --methods uniform d --seeds 0 --steps 20000 --eval-every 10000 --output pilot
+```
+
+각 run을 별도 프로세스로 순차 실행합니다. `--device cuda` 지정도 가능합니다.
+기존 run 폴더를 덮어쓰지 않습니다. smoke는 160 steps, 짧은 horizon, 작은 모델이므로
+수렴·성능 실험이 아닙니다. 기본 학습 예산과 hyperparameter도 성능을 튜닝한 값은 아닙니다.
+
+## SF-SAC 정의: 보상 SF와 엔트로피를 분리
+
+환경의 벡터 보상 `phi_t`에 대해 `r_z = z^T phi_t`를 사용합니다.
+모델, transition table, 환경 내부 reward table, DP, scripted policy 없이 `reset/step` 경험과
+replay TD로만 학습합니다. 초기 상태 bank는 별도 reset 표본입니다.
+
+각 critic은 d차원 **순수 reward SF**와 1차원 **미래 entropy return**을 출력합니다:
+
+```text
+psi(s,a,z) = E[sum_{t>=0} gamma^t phi_t | s0=s, a0=a, pi_z]
+h(s,a,z)   = E[sum_{t>=1} gamma^t (-log pi_z(a_t|s_t)) | s0=s, a0=a]
+Q_soft_i(s,a,z) = z^T psi_i(s,a,z) + temperature * h_i(s,a,z)
+```
+
+현재 action의 entropy는 h에 포함하지 않습니다. 고정 `temperature=0.1`을 사용하며,
+`--temperature`로 지정합니다. 자동 temperature tuning은 구현하지 않았습니다.
+SAC의 entropy regularization은 양쪽 비교군에 동일하게 적용됩니다. 따라서 학습 목적은
+순수 return 최대화에 entropy 항이 추가된 목적이고, 평가 return에는 entropy를 더하지 않습니다.
+
+다음 action에서 `Q_soft`가 작은 target critic의 **전체 (psi,h) 쌍**을 선택합니다.
+SF 좌표별 minimum은 사용하지 않습니다.
+
+```text
+y_psi = phi + gamma * (1-terminated) * E_{a'~pi_z}[psi_target_selected(s',a',z)]
+y_h   =       gamma * (1-terminated) * E_{a'~pi_z}[h_target_selected(s',a',z) - log pi_z(a'|s')]
+critic_loss = sum_i [MSE(psi_i,y_psi) + temperature^2 * MSE(h_i,y_h)]
+actor_loss  = E_{a~pi_z}[temperature * log pi_z(a|s) - min_i Q_soft_i(s,a,z)]
+```
+
+`z^T y_psi + temperature*y_h`는 통상적인 clipped-twin SAC scalar target과 정확히 일치합니다.
+벡터 회귀 loss는 scalar Q loss 하나와 동일하지 않습니다. 각 보상 성분을 개별 학습하는
+SF parameterization입니다. twin 선택으로 생기는 finite-sample/approximation bias는 존재합니다.
+
+- **이산**: 모든 action에 대해 위 기댓값과 actor loss를 확률 가중 합으로 정확히 계산합니다.
+- **연속**: reparameterized tanh Gaussian 표본으로 계산합니다. tanh와 action scaling의
+  log-density Jacobian을 모두 반영합니다. actor gradient는 critic의 action 입력을 통과합니다.
+- target은 critic만 Polyak update합니다. target action은 현재 actor가 같은 z로 생성합니다.
+- warmup은 random action, 이후 behavior는 SAC stochastic actor입니다. epsilon-greedy는 제거했습니다.
+
+## D-LEVER 구현과 비교 protocol
+
+episode 시작마다 behavior z는 원래 prior에서 추출합니다. D-LEVER는 replay 학습 시
+**critic와 actor 양쪽에 쓰는 z minibatch 분포**를 바꿉니다. 두 업데이트는 같은 z를 씁니다.
+벡터 보상과 dynamics가 z에 독립이므로 replay transition을 다른 z로 relabel할 수 있습니다.
+중요도 보정으로 prior 분포로 되돌리지 않으며, leverage를 reward에 더하지 않습니다.
+
+`core.py:Curriculum.sample`의 순서:
+
+1. K updates마다 현재 actor와 twin critics의 detached snapshot을 함께 갱신합니다.
+2. prior에서 `n=N*B`개 후보 z를 독립 추출합니다.
+3. 공통 초기 상태 bank에서
+   `mu_z = mean_s0 E_{a~pi_z}[ (psi_1(s0,a,z)+psi_2(s0,a,z))/2 ]`를 추정합니다.
+   이산 action 기대값은 정확한 합, 연속 action 기대값은 기본 8개 표본입니다.
+   **h와 entropy는 mu에 포함하지 않습니다.** 초기 상태 평균을 먼저 취합니다.
+4. `G_hat = mean_z mu_z mu_z^T`, `lambda_ada=max(ridge*trace(G_hat)/d,1e-8)`.
+5. 첫 refresh는 `G=G_hat+lambda_ada*I`; 이후 regularized Gram에 EMA를 적용합니다.
+6. `ell_z=mu_z^T solve(G,mu_z)`와
+   `q_i=(1-eta)/n + eta*ell_i/sum(ell)`를 계산합니다.
+7. B개 z를 **복원 추출**합니다. refresh 사이에는 후보와 확률을 cache합니다.
+
+Snapshot scoring, Gram, scores, sampling은 모두 no-grad입니다. Gram/solve는 float64입니다.
+Scoring용 torch RNG와 NumPy RNG를 분리해 candidate 평가가 behavior/learner RNG를 바꾸지 않습니다.
+Uniform도 동일한 후보 수와 scoring 진단을 사용하되 `eta=0`입니다.
+
+| method | score |
+|---|---|
+| `uniform` | 후보에서 균등 재샘플링 |
+| `d` | `mu^T G^-1 mu` |
+| `a` | `mu^T G^-2 mu / (1 + mu^T G^-1 mu)` |
+| `e` | `lambda_min(G + mu mu^T) - lambda_min(G)` |
+
+모두 0인 score는 uniform으로 fallback합니다. 기본 `eta=.9`는 prior 10%, tilted 90%입니다.
+기본 `ridge=.01`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=128`입니다.
+여기서 `--alpha`는 SAC temperature가 아니라 **Gram EMA 계수**입니다.
+연속 환경의 scoring 비용이 크면 `--refresh 20`을 두 방법에 동일하게 적용할 수 있습니다.
+이는 refresh 설정 변경이므로 실험에 기록해야 합니다.
+
+동일 environment-step/update budget, 구조, optimizer, entropy 계수를 사용합니다.
+온라인 정책이 달라지므로 replay trajectory 자체가 동일한 실험은 아닙니다.
+
+## Task prior와 환경 의미
+
+Fruit Tree, Minecart, MO-Hopper는 `positive_sphere`를 사용합니다. MO-Ant는 일반적인
+MORL linear-preference 관행에 맞춰 비음수이고 합이 1인 `simplex`를 기본값으로 사용합니다.
+Ant weight는 `Dirichlet(1,1,1)`에서 샘플되므로 simplex 위에서 균등합니다.
+
+```bash
+# 모든 환경을 simplex로 강제하는 ablation:
+python run_suite.py --prior simplex --eta .9 --seeds 0 1 2 3 4 --output simplex_runs
+# 전체 구면:
+python run_suite.py --prior sphere --output sphere_runs
+```
+
+`--radius` 기본값은 1입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
+모든 좌표는 공식 벡터 reward 그대로이며 보상 정규화·클리핑·shaping은 없습니다.
+simplex prior를 쓰는 Ant에서는 x/y 양의 방향에 주로 가치를 주므로 전방향 이동 suite는 아닙니다.
+세 weight의 합이 1이므로 세 reward 좌표에 공통으로 포함된 healthy/contact 항의 계수도
+항상 정확히 1이며, control-cost objective의 weight는 음수가 되지 않습니다.
+전체 구면은 음의 비용 가중치까지 포함하므로 그 task family 의미를 구별해야 합니다.
+
+Fruit Tree는 state 입력만 one-hot 인코딩합니다. 나머지는 공식 raw observation을 사용합니다.
+Fruit Tree 기본 horizon은 depth=6, 나머지는 1,000입니다. 환경 termination에서는
+bootstrap을 끄고, time-limit truncation에서는 episode를 reset하되 bootstrap은 유지합니다.
+observation에 별도의 시간 좌표를 추가하지 않습니다.
+Minecart 한 step은 공식 action-repeat 단위입니다.
+
+## 평가 / 체크포인트
+
+```bash
+python plot.py runs_sfsac --output plots
+python evaluate.py runs_sfsac/mo_ant/d/seed_0/latest.pt --output ant_heldout.npz
+python fruit_reference.py runs_sfsac/fruit_tree/d/seed_0
+```
+
+평가에는 학습된 **stochastic SAC policy**를 그대로 사용합니다. 따라서 scoring의 policy와
+rollout policy가 일치합니다. deterministic action으로 바꾼 별도 평가와 혼동하지 않습니다.
+평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
+
+기본 평가는 10개 weight × weight당 10 rollouts입니다. 각 weight의 scalar utility는
+하위/상위 25%를 제외한 IQM(10개 중 중앙 6개 평균)으로 집계하고, weight별 IQM은 평가
+`.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 이 10개 IQM의 평균입니다.
+simplex 환경의 평가 weight는 MORL-Baselines와
+같은 Riesz s-Energy 방식으로 simplex 위에 고르게 고정합니다. 학습 task는 기존 prior와
+curriculum에 따라 별도로 샘플됩니다. 원래 reward만으로:
+
+- weight별 rollout IQM 전체 저장과 그 IQM들의 mean / worst-decile / minimum 로그
+- rollout으로 측정한 mu의 logdet / minimum eigenvalue
+- predicted mu와 rollout mu 사이 RMSE
+- 길이, timeout fraction, evaluation transition 수
+- Fruit Tree 도달 leaf 수
+
+`rollout_logdet`는 일정한 absolute ridge를 사용합니다. 훈련 EMA logdet와 구별합니다.
+RMSE에는 서로 다른 reset 표본 bank와 action/rollout Monte Carlo 오차도 포함됩니다.
+Reward 크기가 다른 task 사이 raw lower-tail return은 lower-tail regret이 아닙니다.
+`fruit_reference.py`는 평가 전용 leaf enumeration으로 regret을 계산하며,
+stochastic policy의 finite-rollout regret 추정입니다. 학습 코드가 reference를 import하지 않습니다.
+
+```text
+runs_sfsac/<env>/<method>/seed_<n>/
+  config.json, versions.json
+  eval_tasks.npy, initial_states.npy
+  metrics.csv
+  eval_000005000.npz
+  design_000005000.npz
+  latest.pt
+```
+
+`latest.pt`는 actor와 twin critics를 포함한 **inference checkpoint**입니다.
+optimizer/replay/environment state는 없으므로 정확한 학습 재개용은 아닙니다.
+기존 SF Double-Q checkpoint와 호환되지 않으며 evaluate.py가 이를 검사합니다.
+`plot.py` 음영은 seed 간 standard error입니다.
+
+Minecart의 sparse ore return이나 locomotion exploration이 해결됐다는 보장은 없습니다.
+현재 배포 검증은 수학적 일관성과 실제 학습 경로 실행 검사이며, 장기 수렴·D-LEVER 성능 우위는
+실험으로 확인해야 합니다. 상세 결과는 `VALIDATION.md`에 기록했습니다.
+
+## 공식 참고
+
+- https://mo-gymnasium.farama.org/environments/fruit-tree/
+- https://mo-gymnasium.farama.org/environments/minecart/
+- https://mo-gymnasium.farama.org/environments/mo-hopper/
+- https://mo-gymnasium.farama.org/environments/mo-ant/
+- https://spinningup.openai.com/en/latest/algorithms/sac.html
