@@ -30,7 +30,7 @@ class Config:
     prior: str | None = None
     radius: float = 1.
     gamma: float = .99
-    batch_size: int = 128
+    batch_size: int = 256
     multiplier: int = 10
     eta: float = .9
     ridge: float = 1e-2
@@ -39,11 +39,11 @@ class Config:
     hidden: int = 256
     lr: float = 3e-4
     tau: float = .005
-    replay_size: int = 200_000
+    replay_size: int = 1_000_000
     learning_starts: int = 2000
     train_every: int = 1
     temperature: float = .1
-    embedding_action_samples: int = 8
+    embedding_action_samples: int = 2
     eval_every: int = 20_000
     eval_tasks: int = 10
     eval_episodes: int = 10

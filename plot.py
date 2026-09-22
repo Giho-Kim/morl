@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("plots"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    keys = ["mean_return", "worst_decile_return", "rollout_logdet", "embedding_rmse"]
+    keys = ["mean_return", "train_logdet", "rollout_logdet", "embedding_rmse"]
     for envdir in sorted(args.root.iterdir()):
         if not envdir.is_dir():
             continue

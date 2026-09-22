@@ -123,7 +123,7 @@ Uniform도 동일한 후보 수와 scoring 진단을 사용하되 `eta=0`입니�
 | `e` | `lambda_min(G + mu mu^T) - lambda_min(G)` |
 
 모두 0인 score는 uniform으로 fallback합니다. 기본 `eta=.9`는 prior 10%, tilted 90%입니다.
-기본 `ridge=.01`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=128`입니다.
+기본 `ridge=.01`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=256`입니다.
 여기서 `--alpha`는 SAC temperature가 아니라 **Gram EMA 계수**입니다.
 연속 환경의 scoring 비용이 크면 `--refresh 20`을 두 방법에 동일하게 적용할 수 있습니다.
 이는 refresh 설정 변경이므로 실험에 기록해야 합니다.

@@ -117,7 +117,7 @@ def select_twin(outputs, z, temperature):
 
 
 @torch.no_grad()
-def embeddings(net, starts, z, chunk=2048, action_samples=8, seed=1729):
+def embeddings(net, starts, z, chunk=2048, action_samples=2, seed=1729):
     """E_s0 E_a~pi psi(s0,a,z), excluding entropy; twin mean reduces noise.
 
     Exact action expectation for discrete SAC; Monte Carlo for continuous SAC.
@@ -171,9 +171,9 @@ def mixture_probs(scores, eta):
 
 
 class Curriculum:
-    def __init__(self, net, starts, rng, method, prior, batch_size=128,
+    def __init__(self, net, starts, rng, method, prior, batch_size=256,
                  multiplier=10, eta=.9, ridge=1e-2, alpha=.005, refresh=5,
-                 radius=1., action_samples=8, score_seed=1729):
+                 radius=1., action_samples=2, score_seed=1729):
         self.scorer = deepcopy(net).eval().requires_grad_(False)
         self.starts, self.rng = starts, rng
         self.method, self.prior = method, prior
