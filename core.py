@@ -170,26 +170,75 @@ def mixture_probs(scores, eta):
     return (1 - eta) * uniform + eta * scores / scores.sum()
 
 
+@torch.no_grad()
+def td_error_scores(online, target_critics, batch, z, gamma, probes=8,
+                    chunk=2048, seed=1729):
+    """Mean absolute soft-Q TD error for each candidate preference.
+
+    Every candidate is evaluated on the same small replay probe set.  This is
+    a task-level, PLR-inspired priority rather than transition-level PER.
+    Isolating the actor RNG keeps scoring from changing learner exploration.
+    """
+    obs, actions, reward, next_obs, terminal = batch
+    m = min(probes, len(obs))
+    obs, actions, reward, next_obs, terminal = (
+        x[:m] for x in (obs, actions, reward, next_obs, terminal))
+    answer = []
+    with isolated_torch_rng(seed, z.device):
+        for zs in z.split(max(1, chunk // m)):
+            n = len(zs)
+            latents = zs.repeat_interleave(m, dim=0)
+            states = obs.repeat(n, 1)
+            next_states = next_obs.repeat(n, 1)
+            rewards = reward.repeat(n, 1)
+            terminals = terminal.repeat(n)
+            if online.discrete:
+                replay_actions = actions.repeat(n)
+            else:
+                replay_actions = actions.repeat(n, 1)
+            wanted_sf, wanted_h = bellman_target(
+                online, target_critics, next_states, latents, rewards,
+                terminals, gamma)
+            wanted_q = (wanted_sf * latents).sum(-1) + online.temperature * wanted_h
+            errors = torch.zeros(n * m, device=z.device)
+            for critic in online.critics:
+                psi, h = critic(states, latents,
+                                None if online.discrete else replay_actions)
+                if online.discrete:
+                    idx = torch.arange(n * m, device=z.device)
+                    psi, h = psi[idx, replay_actions], h[idx, replay_actions]
+                predicted_q = (psi * latents).sum(-1) + online.temperature * h
+                errors += (predicted_q - wanted_q).abs() / len(online.critics)
+            answer.append(errors.reshape(n, m).mean(1))
+    scores = torch.cat(answer).double()
+    if not torch.isfinite(scores).all():
+        raise FloatingPointError("Non-finite TD-error preference scores")
+    return scores
+
+
 class Curriculum:
     def __init__(self, net, starts, rng, method, prior, batch_size=256,
                  multiplier=10, eta=.9, ridge=1e-3, alpha=.005, refresh=5,
-                 radius=1., action_samples=2, score_seed=1729):
+                 radius=1., action_samples=2, score_seed=1729, td_probes=8):
         self.scorer = deepcopy(net).eval().requires_grad_(False)
+        self.target_scorer = deepcopy(net.critics).eval().requires_grad_(False)
         self.starts, self.rng = starts, rng
         self.method, self.prior = method, prior
         self.batch_size, self.multiplier = batch_size, multiplier
         self.eta, self.ridge, self.alpha, self.refresh = eta, ridge, alpha, refresh
         self.radius, self.dim = radius, net.dim
         self.action_samples, self.score_seed = action_samples, score_seed
+        self.td_probes = td_probes
         self.gram = self.z = self.probs = None
         self.training_remaining = self.behavior_remaining = None
         self.stats = {}
 
     @torch.no_grad()
-    def sample(self, net, update):
+    def sample(self, net, update, batch=None, target_critics=None, gamma=.99):
         if self.z is None or update % self.refresh == 0:
             # Detached ONLINE actor + critic snapshot: current stochastic policy.
             self.scorer.load_state_dict(net.state_dict())
+            self.scorer.temperature = net.temperature
             count = self.batch_size * self.multiplier
             self.z = torch.as_tensor(sample_latents(self.rng, count, self.dim,
                                       self.prior, self.radius), device=self.starts.device)
@@ -202,13 +251,24 @@ class Curriculum:
                                                       dtype=torch.float64)
             self.gram = regularized if self.gram is None else (
                 (1 - self.alpha) * self.gram + self.alpha * regularized)
-            self.scores, lev = design_scores(self.mu, self.gram, self.method)
+            if self.method == "td":
+                if batch is None or target_critics is None:
+                    raise ValueError("TD curriculum requires a replay batch and target critics")
+                self.target_scorer.load_state_dict(target_critics.state_dict())
+                self.scores = td_error_scores(
+                    self.scorer, self.target_scorer, batch, self.z, gamma,
+                    probes=self.td_probes, seed=self.score_seed + update)
+                _, lev = design_scores(self.mu, self.gram, "d")
+            else:
+                self.scores, lev = design_scores(self.mu, self.gram, self.method)
             self.probs = mixture_probs(self.scores, 0 if self.method == "uniform" else self.eta)
             self.training_remaining = np.arange(len(self.z))
             self.behavior_remaining = np.arange(len(self.z))
             self.stats = dict(train_logdet=torch.linalg.slogdet(self.gram).logabsdet.item(),
                               mean_leverage=lev.mean().item(), adaptive_ridge=ada,
-                              sampling_ess=(1 / self.probs.square().sum()).item())
+                              sampling_ess=(1 / self.probs.square().sum()).item(),
+                              mean_td_error=(self.scores.mean().item()
+                                             if self.method == "td" else 0.))
         if len(self.training_remaining) < self.batch_size:
             self.training_remaining = np.arange(len(self.z))
         remaining = self.training_remaining

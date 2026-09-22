@@ -1,5 +1,6 @@
 from copy import deepcopy
 import random
+from unittest.mock import patch
 
 import numpy as np
 import mo_gymnasium as mo
@@ -8,7 +9,7 @@ import torch
 
 from core import (Curriculum, SFSAC, bellman_target, learner_step, isolated_torch_rng,
                   select_twin, design_scores, embeddings, mixture_probs, sample_latents,
-                  temperature_step)
+                  td_error_scores, temperature_step)
 from envs import Benchmark, isolated_global_rng
 
 
@@ -158,6 +159,72 @@ def test_curriculum_snapshot_cache_ema_and_without_replacement():
     assert not torch.equal(old_z, curriculum.z)
 
 
+@pytest.mark.parametrize("discrete", [True, False])
+def test_td_error_preference_scores_are_finite_and_rng_isolated(discrete):
+    torch.manual_seed(23)
+    net = SFSAC(4, 2, 3, 8, discrete, [-1., -1.], [1., 1.])
+    target = deepcopy(net.critics).requires_grad_(False)
+    obs = torch.randn(6, 4)
+    actions = (torch.randint(2, (6,)) if discrete else
+               torch.empty(6, 2).uniform_(-1, 1))
+    batch = (obs, actions, torch.randn(6, 3), torch.randn(6, 4), torch.zeros(6))
+    z = torch.randn(5, 3)
+    state = torch.get_rng_state().clone()
+    first = td_error_scores(net, target, batch, z, .99, probes=3, seed=91)
+    assert torch.equal(state, torch.get_rng_state())
+    assert torch.equal(first, td_error_scores(net, target, batch, z, .99,
+                                               probes=3, seed=91))
+    assert first.shape == (5,)
+    assert first.dtype == torch.float64
+    assert torch.isfinite(first).all() and (first >= 0).all()
+
+
+def test_td_error_scores_match_manual_soft_q_residual():
+    torch.manual_seed(31)
+    net = SFSAC(4, 2, 3, 8, True)
+    target = deepcopy(net.critics).requires_grad_(False)
+    obs, next_obs = torch.randn(3, 4), torch.randn(3, 4)
+    actions = torch.tensor([0, 1, 0])
+    reward, terminal = torch.randn(3, 3), torch.tensor([0., 1., 0.])
+    batch = (obs, actions, reward, next_obs, terminal)
+    z = torch.randn(2, 3)
+    actual = td_error_scores(net, target, batch, z, .97, probes=3)
+    expected = []
+    with torch.no_grad():
+        for latent in z:
+            latents = latent.expand(3, -1)
+            wanted_sf, wanted_h = bellman_target(
+                net, target, next_obs, latents, reward, terminal, .97)
+            wanted_q = (wanted_sf * latents).sum(-1) + net.temperature * wanted_h
+            errors = 0.
+            for critic in net.critics:
+                psi, h = critic(obs, latents)
+                idx = torch.arange(3)
+                predicted_q = ((psi[idx, actions] * latents).sum(-1)
+                               + net.temperature * h[idx, actions])
+                errors = errors + (predicted_q - wanted_q).abs() / 2
+            expected.append(errors.mean())
+    assert torch.allclose(actual, torch.stack(expected).double())
+
+
+def test_td_curriculum_uses_td_scores_and_mixture():
+    torch.manual_seed(29)
+    net = SFSAC(4, 2, 3, 8)
+    target = deepcopy(net.critics).requires_grad_(False)
+    curriculum = Curriculum(net, torch.zeros(2, 4), np.random.default_rng(7),
+                            "td", "sphere", batch_size=4, multiplier=2,
+                            eta=.75, refresh=2)
+    obs = torch.randn(4, 4)
+    batch = (obs, torch.randint(2, (4,)), torch.randn(4, 3),
+             torch.randn(4, 4), torch.zeros(4))
+    with pytest.raises(ValueError, match="replay batch"):
+        curriculum.sample(net, 0)
+    selected = curriculum.sample(net, 0, batch, target, .99)
+    assert selected.shape == (4, 3)
+    assert curriculum.stats["mean_td_error"] > 0
+    assert torch.all(curriculum.probs >= .25 / 8)
+
+
 @pytest.mark.parametrize("prior", ["sphere", "positive_sphere", "simplex"])
 def test_latent_domains(prior):
     z = sample_latents(np.random.default_rng(1), 100, 6, prior)
@@ -216,14 +283,15 @@ def test_mo_ant_matches_official_vector_reward():
     official.close()
 
 
-def test_mo_ant_uses_simplex_preferences_by_default():
+@pytest.mark.parametrize("env", ["minecart", "mo_ant"])
+def test_minecart_and_mo_ant_use_sqrt_d_simplex_preferences_by_default(env):
     from train import Config, evaluation_tasks
-    cfg = Config(env="mo_ant", device="cpu").resolve()
+    cfg = Config(env=env, device="cpu").resolve()
     assert cfg.prior == "simplex"
     assert cfg.radius == pytest.approx(np.sqrt(3))
-    z = sample_latents(np.random.default_rng(3), 100, 3, cfg.prior)
+    z = sample_latents(np.random.default_rng(3), 100, 3, cfg.prior, cfg.radius)
     assert (z >= 0).all()
-    assert np.allclose(z.sum(1), 1.)
+    assert np.allclose(z.sum(1), cfg.radius)
     first = evaluation_tasks(cfg, 3)
     second = evaluation_tasks(cfg, 3)
     assert first.shape == (20, 3)
@@ -276,7 +344,10 @@ def test_evaluation_preserves_rng_and_repeats():
     np.random.seed(123)
     random.seed(123)
     torch_state = torch.get_rng_state().clone()
-    first, arrays = evaluate(net, cfg, z, start)
+    with patch.object(net, "act", wraps=net.act) as act:
+        first, arrays = evaluate(net, cfg, z, start)
+    assert act.call_count > 0
+    assert all(call.kwargs.get("deterministic") is True for call in act.call_args_list)
     assert torch.equal(torch_state, torch.get_rng_state())
     assert np.random.random() == expected_np
     assert random.random() == expected_py

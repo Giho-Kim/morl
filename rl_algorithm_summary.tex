@@ -1,0 +1,66 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+
+\begin{document}
+
+\begin{center}
+    {\large\bf Conditional Successor-Feature Soft Actor--Critic}
+\end{center}
+
+The environment emits a vector reward $\boldsymbol\phi_t\in\mathbb{R}^d$.
+A task is specified by a preference vector $\mathbf z\in\mathbb{R}^d$, with
+scalar reward $r_{\mathbf z,t}=\mathbf z^\top\boldsymbol\phi_t$.  One shared
+actor $\pi_\theta(a\mid s,\mathbf z)$ and two critics are trained across all
+preferences.  Because the dynamics and vector reward do not depend on
+$\mathbf z$, replay transitions $(s,a,\boldsymbol\phi,s',m)$ can be relabeled
+with freshly sampled preferences during learning.  Here $m=1$ only for true
+environment termination; time-limit truncation continues to bootstrap.
+
+Each critic predicts a vector-valued reward successor feature and a separate
+future entropy return,
+\begin{align*}
+ \boldsymbol\psi_i(s,a,\mathbf z)
+ &=\mathbb E\!\left[\sum_{k\geq0}\gamma^k
+        \boldsymbol\phi_{t+k}\right], &
+ h_i(s,a,\mathbf z)
+ &=\mathbb E\!\left[\sum_{k\geq1}\gamma^k
+        \bigl(-\log\pi_\theta(a_{t+k}\mid s_{t+k},\mathbf z)\bigr)\right],\\[-2pt]
+ Q_i^{\mathrm{soft}}(s,a,\mathbf z)
+ &=\mathbf z^\top\boldsymbol\psi_i(s,a,\mathbf z)+\alpha h_i(s,a,\mathbf z),
+\end{align*}
+where $\alpha$ is an automatically tuned SAC temperature.  For the next
+state, an action is drawn from the current actor and the target critic with the
+smaller scalar soft value is selected as a \emph{whole} $(\boldsymbol\psi,h)$
+pair.  Denoting that pair by $(\bar{\boldsymbol\psi},\bar h)$ gives
+\begin{align*}
+ \mathbf y_\psi &= \boldsymbol\phi+\gamma(1-m)
+       \mathbb E_{a'\sim\pi_\theta}
+       [\bar{\boldsymbol\psi}(s',a',\mathbf z)],\\
+ y_h &= \gamma(1-m)\mathbb E_{a'\sim\pi_\theta}
+       [\bar h(s',a',\mathbf z)-\log\pi_\theta(a'\mid s',\mathbf z)].
+\end{align*}
+The critics minimize
+\[
+ \mathcal L_Q=\sum_{i=1}^2\left(
+ \|\boldsymbol\psi_i-\mathbf y_\psi\|_2^2
+ +\alpha^2(h_i-y_h)^2\right),
+\]
+while the actor minimizes the standard conditional SAC objective
+\[
+ \mathcal L_\pi=
+ \mathbb E_{s,\mathbf z,\,a\sim\pi_\theta}
+ \left[\alpha\log\pi_\theta(a\mid s,\mathbf z)
+ -\min_i Q_i^{\mathrm{soft}}(s,a,\mathbf z)\right].
+\]
+The log-temperature is optimized toward target entropy $-|\mathcal A|$ for
+continuous control and $0.98\log|\mathcal A|$ for discrete control.  Discrete
+action expectations are evaluated exactly; continuous actions use the
+reparameterized, action-scaled tanh-Gaussian policy.  Target critics are updated
+by Polyak averaging, and evaluation reports only discounted environment reward,
+without the entropy bonus.
+
+\end{document}

@@ -21,7 +21,7 @@ def main():
             continue
         fig, axes = plt.subplots(1, len(keys), figsize=(17, 3.5))
         found = False
-        for method in ("uniform", "d", "a", "e"):
+        for method in ("uniform", "d", "a", "e", "td"):
             data = []
             for file in sorted((envdir / method).glob("seed_*/metrics.csv")):
                 with file.open() as f:

@@ -52,6 +52,7 @@ class Config:
     eval_seed: int = 2027
     eval_ridge: float = 1e-3
     start_samples: int = 8
+    td_probes: int = 8
     device: str = "auto"
     threads: int = 1
     output: str = "runs"
@@ -69,7 +70,8 @@ class Config:
                     self.replay_size, self.eval_every, self.eval_tasks,
                     self.eval_episodes, self.start_samples, self.train_every,
                     self.hidden, self.lr, self.ridge, self.eval_ridge, self.radius,
-                    self.threads, self.temperature, self.embedding_action_samples)
+                    self.threads, self.temperature, self.embedding_action_samples,
+                    self.td_probes)
         if min(positive) <= 0:
             raise ValueError("Counts, scales, rates and ridge must be positive")
         if not (0 <= self.eta <= 1 and 0 < self.alpha <= 1 and 0 < self.tau <= 1
@@ -126,7 +128,7 @@ def iqm(values, axis=-1):
 
 @torch.no_grad()
 def evaluate(net, cfg, tasks, starts):
-    """Independent fixed tasks + common episode seeds. No test-task updates."""
+    """Deterministic policy evaluation on fixed tasks; no test-task updates."""
     device = next(net.parameters()).device
     returns = np.zeros((len(tasks), cfg.eval_episodes, net.dim), np.float64)
     terminal_ids = np.full((len(tasks), cfg.eval_episodes), -1, np.int64)
@@ -141,7 +143,10 @@ def evaluate(net, cfg, tasks, starts):
                 with isolated_global_rng(seed), isolated_torch_rng(seed, device):
                     obs, _ = env.reset(seed=seed)
                     for t in range(env.horizon):
-                        action_tensor = net.act(tensor(obs[None], device), zt)
+                        # Evaluation measures exploitation, not the entropy-regularized
+                        # behavior policy: categorical argmax or Gaussian mean.
+                        action_tensor = net.act(tensor(obs[None], device), zt,
+                                                deterministic=True)
                         action = action_tensor.item() if net.discrete else action_tensor[0].cpu().numpy()
                         obs, reward, terminated, truncated, info = env.step(action)
                         returns[j, k] += cfg.gamma ** t * reward
@@ -153,8 +158,8 @@ def evaluate(net, cfg, tasks, starts):
                             break
         env.close()
     utility = np.einsum("nd,nkd->nk", tasks, returns)
-    # One robust scalar score per weight. With the default 10 rollouts this
-    # discards the lowest/highest two and averages the central six.
+    # Multiple rollouts still capture stochastic environment dynamics. With the
+    # default 10 rollouts, discard the lowest/highest two and average the middle six.
     utility_iqm = iqm(utility, axis=1)
     measured = returns.mean(1)
     predicted = embeddings(net, tensor(starts, device), tensor(tasks, device),
@@ -214,7 +219,8 @@ def train(cfg):
     curriculum = Curriculum(online, tensor(starts, cfg.device), design_rng, cfg.method,
                             cfg.prior, cfg.batch_size, cfg.multiplier, cfg.eta,
                             cfg.ridge, cfg.alpha, cfg.refresh, cfg.radius,
-                            cfg.embedding_action_samples, cfg.seed + 17000)
+                            cfg.embedding_action_samples, cfg.seed + 17000,
+                            cfg.td_probes)
     tasks = evaluation_tasks(cfg, env.dim)
     np.save(directory / "eval_tasks.npy", tasks)
     np.save(directory / "initial_states.npy", starts)
@@ -240,7 +246,8 @@ def train(cfg):
                        cumulative_eval_transitions=total_eval_steps,
                        **learner_metrics)
         metrics.update({k: curriculum.stats.get(k, 0.) for k in
-                        ("train_logdet", "mean_leverage", "adaptive_ridge", "sampling_ess")})
+                        ("train_logdet", "mean_leverage", "adaptive_ridge", "sampling_ess",
+                         "mean_td_error")})
         if columns is None:
             columns = list(metrics)
         with (directory / "metrics.csv").open("a", newline="") as f:
@@ -284,8 +291,8 @@ def train(cfg):
             replay.add(obs, action, reward, next_obs, terminated)
             obs = next_obs
             if step >= cfg.learning_starts and step % cfg.train_every == 0:
-                z = curriculum.sample(online, updates)
                 batch = replay.sample(replay_rng, cfg.batch_size, cfg.device)
+                z = curriculum.sample(online, updates, batch, target, cfg.gamma)
                 learner_metrics = learner_step(online, target, critic_optimizer, actor_optimizer,
                                                 batch, z, cfg.gamma, cfg.tau)
                 learner_metrics.update(temperature_step(
@@ -310,7 +317,7 @@ def train(cfg):
 def parse_config():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", choices=SPECS, default="fruit_tree")
-    parser.add_argument("--method", choices=("uniform", "d", "a", "e"), default="d")
+    parser.add_argument("--method", choices=("uniform", "d", "a", "e", "td"), default="d")
     parser.add_argument("--prior", choices=("sphere", "positive_sphere", "simplex"))
     defaults = Config()
     for name in Config.__dataclass_fields__:

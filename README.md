@@ -43,7 +43,7 @@ python run_suite.py --seeds 0 1 2 3 4 --output runs_sfsac
 
 ```bash
 python train.py --env mo_ant --method d --seed 0 --output ant_runs
-python run_suite.py --methods uniform d a e --seeds 0 1 2 3 4 --output all_methods
+python run_suite.py --methods uniform d a e td --seeds 0 1 2 3 4 --output all_methods
 python run_suite.py --methods uniform d --seeds 0 --steps 20000 --eval-every 10000 --output pilot
 ```
 
@@ -126,6 +126,7 @@ Uniform도 동일한 후보 수와 scoring 진단을 사용하되 `eta=0`입니�
 | `d` | `mu^T G^-1 mu` |
 | `a` | `mu^T G^-2 mu / (1 + mu^T G^-1 mu)` |
 | `e` | `lambda_min(G + mu mu^T) - lambda_min(G)` |
+| `td` | 공통 replay probe에서 twin soft-Q의 평균 absolute TD error |
 
 모두 0인 score는 uniform으로 fallback합니다. 기본 `eta=.9`는 prior 10%, tilted 90%입니다.
 기본 `ridge=.001`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=256`입니다.
@@ -133,14 +134,19 @@ Uniform도 동일한 후보 수와 scoring 진단을 사용하되 `eta=0`입니�
 연속 환경의 scoring 비용이 크면 `--refresh 20`을 두 방법에 동일하게 적용할 수 있습니다.
 이는 refresh 설정 변경이므로 실험에 기록해야 합니다.
 
+`td`는 PLR-inspired task-level baseline입니다. 매 refresh에서 모든 후보를 동일한 replay
+transition probe(`--td-probes`, 기본 8개)로 평가하고, 두 critic의 scalar soft-Q absolute TD error를
+평균합니다. transition 자체를 우선순위화하는 PER나 discrete level을 저장하는 원래 PLR과는
+구별됩니다. target critic snapshot과 scoring 전용 RNG를 사용하므로 learner RNG를 바꾸지 않습니다.
+
 동일 environment-step/update budget, 구조, optimizer, entropy 계수를 사용합니다.
 온라인 정책이 달라지므로 replay trajectory 자체가 동일한 실험은 아닙니다.
 
 ## Task prior와 환경 의미
 
-Fruit Tree, Minecart, MO-Hopper는 `positive_sphere`를 사용합니다. MO-Ant는 일반적인
-MORL linear-preference 관행에 맞춰 비음수이고 합이 1인 `simplex`를 기본값으로 사용합니다.
-Ant weight는 `Dirichlet(1,1,1)`에서 샘플되므로 simplex 위에서 균등합니다.
+Fruit Tree와 MO-Hopper는 `positive_sphere`를 사용합니다. Minecart와 MO-Ant는 비음수인
+`simplex`를 기본값으로 사용합니다. 세 차원의 weight는 `Dirichlet(1,1,1)`에서 샘플한 뒤
+기본 radius `sqrt(3)`을 곱하므로 합은 `sqrt(3)`이고, 이 scaled simplex 위에서 균등합니다.
 
 ```bash
 # 모든 환경을 simplex로 강제하는 ablation:
@@ -152,8 +158,8 @@ python run_suite.py --prior sphere --output sphere_runs
 `--radius` 기본값은 reward 차원 `d`의 제곱근 `sqrt(d)`입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
 모든 좌표는 공식 벡터 reward 그대로이며 보상 정규화·클리핑·shaping은 없습니다.
 simplex prior를 쓰는 Ant에서는 x/y 양의 방향에 주로 가치를 주므로 전방향 이동 suite는 아닙니다.
-세 weight의 합이 1이므로 세 reward 좌표에 공통으로 포함된 healthy/contact 항의 계수도
-항상 정확히 1이며, control-cost objective의 weight는 음수가 되지 않습니다.
+세 weight의 합은 기본적으로 `sqrt(3)`으로 고정되며, control-cost objective의 weight는 음수가
+되지 않습니다. `--radius 1`을 지정하면 합이 1인 표준 unit simplex가 됩니다.
 전체 구면은 음의 비용 가중치까지 포함하므로 그 task family 의미를 구별해야 합니다.
 
 Fruit Tree는 state 입력만 one-hot 인코딩합니다. 나머지는 공식 raw observation을 사용합니다.
@@ -170,8 +176,9 @@ python evaluate.py runs_sfsac/mo_ant/d/seed_0/latest.pt --output ant_heldout.npz
 python fruit_reference.py runs_sfsac/fruit_tree/d/seed_0
 ```
 
-평가에는 학습된 **stochastic SAC policy**를 그대로 사용합니다. 따라서 scoring의 policy와
-rollout policy가 일치합니다. deterministic action으로 바꾼 별도 평가와 혼동하지 않습니다.
+평가에는 학습된 SAC policy의 **deterministic action**을 사용합니다. 이산 환경은 categorical
+argmax, 연속 환경은 Gaussian mean을 tanh 변환한 action입니다. 학습과 data collection은
+stochastic policy를 그대로 사용합니다.
 평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
 
 기본 평가는 20개 weight × weight당 10 rollouts입니다. 각 weight의 scalar utility는
@@ -190,8 +197,8 @@ curriculum에 따라 별도로 샘플됩니다. 원래 reward만으로:
 `rollout_logdet`는 일정한 absolute ridge를 사용합니다. 훈련 EMA logdet와 구별합니다.
 RMSE에는 서로 다른 reset 표본 bank와 action/rollout Monte Carlo 오차도 포함됩니다.
 Reward 크기가 다른 task 사이 raw lower-tail return은 lower-tail regret이 아닙니다.
-`fruit_reference.py`는 평가 전용 leaf enumeration으로 regret을 계산하며,
-stochastic policy의 finite-rollout regret 추정입니다. 학습 코드가 reference를 import하지 않습니다.
+`fruit_reference.py`는 평가 전용 leaf enumeration으로 regret을 계산합니다. 학습 코드는
+reference를 import하지 않습니다.
 
 ```text
 runs_sfsac/<env>/<method>/seed_<n>/
@@ -219,3 +226,4 @@ Minecart의 sparse ore return이나 locomotion exploration이 해결됐다는 �
 - https://mo-gymnasium.farama.org/environments/mo-hopper/
 - https://mo-gymnasium.farama.org/environments/mo-ant/
 - https://spinningup.openai.com/en/latest/algorithms/sac.html
+- https://proceedings.mlr.press/v139/jiang21b.html (PLR; `td` baseline의 task-priority 근거)
