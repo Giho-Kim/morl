@@ -27,10 +27,12 @@ def main():
     cfg.eval_seed = args.seed
     cfg.resolve()
     torch.set_num_threads(cfg.threads)
-    if saved.get("algorithm") != "conditional_sf_sac_v1":
+    if saved.get("algorithm") not in ("conditional_sf_sac_v1",
+                                      "conditional_sf_sac_v2_auto_temperature"):
         raise ValueError("This evaluator requires a new conditional SF-SAC checkpoint")
+    temperature = float(saved.get("temperature", cfg.temperature))
     net = SFSAC(saved["obs_dim"], saved["actions"], saved["dim"], cfg.hidden,
-                saved["discrete"], saved["low"], saved["high"], cfg.temperature).to(args.device)
+                saved["discrete"], saved["low"], saved["high"], temperature).to(args.device)
     net.load_state_dict(saved["model"])
     net.eval()
     tasks = evaluation_tasks(cfg, saved["dim"])

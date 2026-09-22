@@ -2,7 +2,7 @@
 
 Each twin critic outputs (psi, h); Q_soft = z^T psi + temperature*h.
 h is discounted future entropy, excluding the current action's entropy.
-Temperature is fixed, so this decomposition has a stationary Bellman meaning.
+Temperature is tuned automatically; psi and h remain unweighted components.
 """
 from copy import deepcopy
 from contextlib import contextmanager
@@ -172,7 +172,7 @@ def mixture_probs(scores, eta):
 
 class Curriculum:
     def __init__(self, net, starts, rng, method, prior, batch_size=256,
-                 multiplier=10, eta=.9, ridge=1e-2, alpha=.005, refresh=5,
+                 multiplier=10, eta=.9, ridge=1e-3, alpha=.005, refresh=5,
                  radius=1., action_samples=2, score_seed=1729):
         self.scorer = deepcopy(net).eval().requires_grad_(False)
         self.starts, self.rng = starts, rng
@@ -295,3 +295,27 @@ def learner_step(online, target_critics, critic_optimizer, actor_optimizer,
             q.lerp_(p, tau)
     return dict(sf_td_loss=sf_loss.item(), entropy_td_loss=h_loss.item(),
                 actor_loss=actor_loss.item(), policy_entropy=entropy.item(), grad_norm=float(grad))
+
+
+def temperature_step(online, optimizer, log_temperature, obs, z, target_entropy):
+    """Tune log alpha using exact discrete entropy or a continuous policy sample."""
+    with torch.no_grad():
+        if online.discrete:
+            probs, logp = online.actor.distribution(obs, z)
+            entropy = -(probs * logp).sum(-1)
+        else:
+            _, logp = online.actor.sample(obs, z)
+            entropy = -logp
+        entropy_error = entropy - target_entropy
+    loss = (log_temperature * entropy_error).mean()
+    if not torch.isfinite(loss):
+        raise FloatingPointError("Non-finite temperature loss")
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    temperature = log_temperature.detach().exp()
+    if not torch.isfinite(temperature):
+        raise FloatingPointError("Non-finite temperature")
+    online.temperature = temperature.item()
+    return dict(temperature=online.temperature, temperature_loss=loss.item(),
+                target_entropy=float(target_entropy))

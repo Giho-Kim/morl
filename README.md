@@ -65,8 +65,9 @@ h(s,a,z)   = E[sum_{t>=1} gamma^t (-log pi_z(a_t|s_t)) | s0=s, a0=a]
 Q_soft_i(s,a,z) = z^T psi_i(s,a,z) + temperature * h_i(s,a,z)
 ```
 
-현재 action의 entropy는 h에 포함하지 않습니다. 고정 `temperature=0.1`을 사용하며,
-`--temperature`로 지정합니다. 자동 temperature tuning은 구현하지 않았습니다.
+현재 action의 entropy는 h에 포함하지 않습니다. `--temperature` 기본값 `0.1`은 자동
+temperature tuning의 초기값입니다. `log(temperature)`를 매 update 학습하며 target entropy는
+이산 환경에서 `0.98*log(|A|)`, 연속 환경에서 `-|A|`입니다.
 SAC의 entropy regularization은 양쪽 비교군에 동일하게 적용됩니다. 따라서 학습 목적은
 순수 return 최대화에 entropy 항이 추가된 목적이고, 평가 return에는 entropy를 더하지 않습니다.
 
@@ -92,8 +93,11 @@ SF parameterization입니다. twin 선택으로 생기는 finite-sample/approxim
 
 ## D-LEVER 구현과 비교 protocol
 
-episode 시작마다 behavior z는 원래 prior에서 추출합니다. D-LEVER는 replay 학습 시
-**critic와 actor 양쪽에 쓰는 z minibatch 분포**를 바꿉니다. 두 업데이트는 같은 z를 씁니다.
+기본적으로 episode 시작마다 behavior z는 원래 prior에서 추출합니다. `--tilted-behavior`를
+켜면 현재 cached 후보와 확률에서 behavior z도 추출합니다. cache가 생기기 전 warmup에는
+prior를 사용하며 behavior sampling 때문에 score나 cache를 새로 계산하지 않습니다.
+D-LEVER는 replay 학습 시 **critic와 actor 양쪽에 쓰는 z minibatch 분포**를 바꿉니다.
+두 업데이트는 같은 z를 씁니다.
 벡터 보상과 dynamics가 z에 독립이므로 replay transition을 다른 z로 relabel할 수 있습니다.
 중요도 보정으로 prior 분포로 되돌리지 않으며, leverage를 reward에 더하지 않습니다.
 
@@ -103,7 +107,7 @@ episode 시작마다 behavior z는 원래 prior에서 추출합니다. D-LEVER�
 2. prior에서 `n=N*B`개 후보 z를 독립 추출합니다.
 3. 공통 초기 상태 bank에서
    `mu_z = mean_s0 E_{a~pi_z}[ (psi_1(s0,a,z)+psi_2(s0,a,z))/2 ]`를 추정합니다.
-   이산 action 기대값은 정확한 합, 연속 action 기대값은 기본 8개 표본입니다.
+   이산 action 기대값은 정확한 합, 연속 action 기대값은 기본 2개 표본입니다.
    **h와 entropy는 mu에 포함하지 않습니다.** 초기 상태 평균을 먼저 취합니다.
 4. `G_hat = mean_z mu_z mu_z^T`, `lambda_ada=max(ridge*trace(G_hat)/d,1e-8)`.
 5. 첫 refresh는 `G=G_hat+lambda_ada*I`; 이후 regularized Gram에 EMA를 적용합니다.
@@ -123,7 +127,7 @@ Uniform도 동일한 후보 수와 scoring 진단을 사용하되 `eta=0`입니�
 | `e` | `lambda_min(G + mu mu^T) - lambda_min(G)` |
 
 모두 0인 score는 uniform으로 fallback합니다. 기본 `eta=.9`는 prior 10%, tilted 90%입니다.
-기본 `ridge=.01`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=256`입니다.
+기본 `ridge=.001`, Gram EMA `alpha=.005`, `refresh=5`, `multiplier=10`, `batch_size=256`입니다.
 여기서 `--alpha`는 SAC temperature가 아니라 **Gram EMA 계수**입니다.
 연속 환경의 scoring 비용이 크면 `--refresh 20`을 두 방법에 동일하게 적용할 수 있습니다.
 이는 refresh 설정 변경이므로 실험에 기록해야 합니다.
@@ -144,7 +148,7 @@ python run_suite.py --prior simplex --eta .9 --seeds 0 1 2 3 4 --output simplex_
 python run_suite.py --prior sphere --output sphere_runs
 ```
 
-`--radius` 기본값은 1입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
+`--radius` 기본값은 reward 차원 `d`의 제곱근 `sqrt(d)`입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
 모든 좌표는 공식 벡터 reward 그대로이며 보상 정규화·클리핑·shaping은 없습니다.
 simplex prior를 쓰는 Ant에서는 x/y 양의 방향에 주로 가치를 주므로 전방향 이동 suite는 아닙니다.
 세 weight의 합이 1이므로 세 reward 좌표에 공통으로 포함된 healthy/contact 항의 계수도
@@ -169,9 +173,9 @@ python fruit_reference.py runs_sfsac/fruit_tree/d/seed_0
 rollout policy가 일치합니다. deterministic action으로 바꾼 별도 평가와 혼동하지 않습니다.
 평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
 
-기본 평가는 10개 weight × weight당 10 rollouts입니다. 각 weight의 scalar utility는
+기본 평가는 20개 weight × weight당 10 rollouts입니다. 각 weight의 scalar utility는
 하위/상위 25%를 제외한 IQM(10개 중 중앙 6개 평균)으로 집계하고, weight별 IQM은 평가
-`.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 이 10개 IQM의 평균입니다.
+`.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 이 20개 IQM의 평균입니다.
 simplex 환경의 평가 weight는 MORL-Baselines와
 같은 Riesz s-Energy 방식으로 simplex 위에 고르게 고정합니다. 학습 task는 기존 prior와
 curriculum에 따라 별도로 샘플됩니다. 원래 reward만으로:

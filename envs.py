@@ -17,6 +17,8 @@ SPECS = {
     "mo_ant": ("mo-ant-v5", 1000, "simplex", 1_000_000),
 }
 
+REWARD_DIMS = {"fruit_tree": 6, "minecart": 3, "mo_hopper": 3, "mo_ant": 3}
+
 
 @contextmanager
 def isolated_global_rng(seed):

@@ -6,8 +6,9 @@ import mo_gymnasium as mo
 import pytest
 import torch
 
-from core import (Curriculum, SFSAC, bellman_target, learner_step, isolated_torch_rng, select_twin, design_scores,
-                  embeddings, mixture_probs, sample_latents)
+from core import (Curriculum, SFSAC, bellman_target, learner_step, isolated_torch_rng,
+                  select_twin, design_scores, embeddings, mixture_probs, sample_latents,
+                  temperature_step)
 from envs import Benchmark, isolated_global_rng
 
 
@@ -113,6 +114,22 @@ def test_actor_and_critic_update_and_action_bounds(discrete):
     assert any(not torch.equal(a, b) for a, b in zip(critic_before, net.critics.parameters()))
 
 
+@pytest.mark.parametrize("discrete", [True, False])
+def test_automatic_temperature_tuning(discrete):
+    torch.manual_seed(11)
+    net = SFSAC(4, 2, 3, 8, discrete, [-1., -1.], [1., 1.], temperature=.1)
+    obs, z = torch.randn(16, 4), torch.randn(16, 3)
+    log_temperature = torch.tensor(np.log(.1), requires_grad=True)
+    optimizer = torch.optim.Adam([log_temperature], lr=3e-4)
+    target = .98 * np.log(2) if discrete else -2.
+    before = log_temperature.detach().clone()
+    metrics = temperature_step(net, optimizer, log_temperature, obs, z, target)
+    assert not torch.equal(before, log_temperature)
+    assert metrics["temperature"] == pytest.approx(log_temperature.exp().item())
+    assert metrics["target_entropy"] == pytest.approx(target)
+    assert all(np.isfinite(v) for v in metrics.values())
+
+
 def test_curriculum_snapshot_cache_ema_and_replacement():
     torch.manual_seed(5)
     net = SFSAC(4, 2, 3, 8)
@@ -201,15 +218,32 @@ def test_mo_ant_uses_simplex_preferences_by_default():
     from train import Config, evaluation_tasks
     cfg = Config(env="mo_ant", device="cpu").resolve()
     assert cfg.prior == "simplex"
+    assert cfg.radius == pytest.approx(np.sqrt(3))
     z = sample_latents(np.random.default_rng(3), 100, 3, cfg.prior)
     assert (z >= 0).all()
     assert np.allclose(z.sum(1), 1.)
     first = evaluation_tasks(cfg, 3)
     second = evaluation_tasks(cfg, 3)
-    assert first.shape == (10, 3)
+    assert first.shape == (20, 3)
     assert np.array_equal(first, second)
     assert (first >= 0).all()
-    assert np.allclose(first.sum(1), 1.)
+    assert np.allclose(first.sum(1), cfg.radius)
+
+
+def test_tilted_behavior_uses_existing_cache_only():
+    from types import SimpleNamespace
+    from train import Config, behavior_task
+    cfg = Config(env="mo_ant", tilted_behavior=True, device="cpu").resolve()
+    cached_z = torch.tensor([[1., 2., 3.], [4., 5., 6.]])
+    curriculum = SimpleNamespace(z=cached_z, probs=torch.tensor([0., 1.]))
+    before = cached_z.clone()
+    selected = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)
+    assert np.array_equal(selected, np.array([4., 5., 6.], np.float32))
+    assert torch.equal(cached_z, before)
+    curriculum.z = None
+    fallback = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)
+    assert (fallback >= 0).all()
+    assert fallback.sum() == pytest.approx(cfg.radius)
 
 
 def test_iqm_of_ten_rollouts_averages_central_six():

@@ -1,4 +1,6 @@
 runs/
+runs_*/
+plots/
 __pycache__/
 .pytest_cache/
 *.py[cod]

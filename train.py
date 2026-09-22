@@ -5,6 +5,7 @@ import csv
 from dataclasses import asdict, dataclass
 import importlib.metadata
 import json
+import math
 from pathlib import Path
 import random
 import time
@@ -15,8 +16,8 @@ from pymoo.util.ref_dirs import get_reference_directions
 from tqdm.auto import tqdm
 
 from core import (Curriculum, Replay, SFSAC, isolated_torch_rng, embeddings, learner_step,
-                  sample_latents)
-from envs import Benchmark, SPECS, isolated_global_rng
+                  sample_latents, temperature_step)
+from envs import Benchmark, REWARD_DIMS, SPECS, isolated_global_rng
 
 
 @dataclass
@@ -28,24 +29,25 @@ class Config:
     horizon: int | None = None
     steps: int | None = None
     prior: str | None = None
-    radius: float = 1.
+    radius: float | None = None
     gamma: float = .99
     batch_size: int = 256
     multiplier: int = 10
     eta: float = .9
-    ridge: float = 1e-2
+    ridge: float = 1e-3
     alpha: float = .005
     refresh: int = 5
     hidden: int = 256
     lr: float = 3e-4
     tau: float = .005
     replay_size: int = 1_000_000
-    learning_starts: int = 2000
+    learning_starts: int = 20_000
     train_every: int = 1
+    tilted_behavior: bool = False
     temperature: float = .1
     embedding_action_samples: int = 2
     eval_every: int = 20_000
-    eval_tasks: int = 10
+    eval_tasks: int = 20
     eval_episodes: int = 10
     eval_seed: int = 2027
     eval_ridge: float = 1e-3
@@ -59,6 +61,8 @@ class Config:
             self.steps = SPECS[self.env][3]
         if self.prior is None:
             self.prior = SPECS[self.env][2]
+        if self.radius is None:
+            self.radius = float(np.sqrt(REWARD_DIMS[self.env]))
         if self.device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         positive = (self.steps, self.batch_size, self.multiplier, self.refresh,
@@ -98,6 +102,16 @@ def evaluation_tasks(cfg, dim):
         return (cfg.radius * tasks).astype(np.float32)
     return sample_latents(np.random.default_rng(cfg.eval_seed), cfg.eval_tasks,
                           dim, cfg.prior, cfg.radius)
+
+
+def behavior_task(cfg, rng, dim, curriculum):
+    """Sample one episode task, optionally from the existing curriculum cache."""
+    if cfg.tilted_behavior and curriculum.z is not None:
+        probs = curriculum.probs.detach().cpu().numpy().astype(np.float64)
+        probs /= probs.sum()
+        index = rng.choice(len(probs), p=probs)
+        return curriculum.z[index].detach().cpu().numpy().copy()
+    return sample_latents(rng, 1, dim, cfg.prior, cfg.radius)[0]
 
 
 def iqm(values, axis=-1):
@@ -189,9 +203,13 @@ def train(cfg):
     (directory / "versions.json").write_text(json.dumps(versions, indent=2))
     env = Benchmark(cfg.env, cfg.depth, cfg.horizon)
     online = make_model(cfg, env)
+    target_entropy = (.98 * math.log(env.actions) if env.discrete else -float(env.actions))
+    log_temperature = torch.tensor(math.log(cfg.temperature), dtype=torch.float32,
+                                   device=cfg.device, requires_grad=True)
     target = deepcopy(online.critics).eval().requires_grad_(False)
     critic_optimizer = torch.optim.Adam(online.critics.parameters(), lr=cfg.lr)
     actor_optimizer = torch.optim.Adam(online.actor.parameters(), lr=cfg.lr)
+    temperature_optimizer = torch.optim.Adam([log_temperature], lr=cfg.lr)
     replay = Replay(cfg.replay_size, env.obs_dim, env.dim, env.actions, env.discrete)
     starts = initial_bank(cfg)
     curriculum = Curriculum(online, tensor(starts, cfg.device), design_rng, cfg.method,
@@ -202,10 +220,11 @@ def train(cfg):
     np.save(directory / "eval_tasks.npy", tasks)
     np.save(directory / "initial_states.npy", starts)
     obs, _ = env.reset(seed=cfg.seed)
-    z_behavior = sample_latents(behavior_rng, 1, env.dim, cfg.prior, cfg.radius)[0]
+    z_behavior = behavior_task(cfg, behavior_rng, env.dim, curriculum)
     updates, episode = 0, 0
     learner_metrics = dict(sf_td_loss=0., entropy_td_loss=0., actor_loss=0.,
-                           policy_entropy=0., grad_norm=0.)
+                           policy_entropy=0., grad_norm=0., temperature=cfg.temperature,
+                           temperature_loss=0., target_entropy=target_entropy)
     training_seconds = 0.
     total_eval_steps = 0
     columns = None
@@ -238,11 +257,12 @@ def train(cfg):
                 gram=curriculum.gram.cpu().numpy())
         # Inference checkpoint, not an exact training-resume snapshot.
         torch.save(dict(config=asdict(cfg), model=online.state_dict(), steps=step,
+                        temperature=online.temperature, target_entropy=target_entropy,
                         obs_dim=env.obs_dim, actions=env.actions, dim=env.dim,
                         discrete=env.discrete,
                         low=None if env.discrete else env.low.tolist(),
                         high=None if env.discrete else env.high.tolist(),
-                        algorithm="conditional_sf_sac_v1"),
+                        algorithm="conditional_sf_sac_v2_auto_temperature"),
                    directory / "latest.pt")
         progress.write(json.dumps(dict(env=cfg.env, method=cfg.method, seed=cfg.seed,
                                        **metrics)))
@@ -269,11 +289,13 @@ def train(cfg):
                 batch = replay.sample(replay_rng, cfg.batch_size, cfg.device)
                 learner_metrics = learner_step(online, target, critic_optimizer, actor_optimizer,
                                                 batch, z, cfg.gamma, cfg.tau)
+                learner_metrics.update(temperature_step(
+                    online, temperature_optimizer, log_temperature, batch[0], z, target_entropy))
                 updates += 1
             if terminated or truncated:
                 episode += 1
                 obs, _ = env.reset()
-                z_behavior = sample_latents(behavior_rng, 1, env.dim, cfg.prior, cfg.radius)[0]
+                z_behavior = behavior_task(cfg, behavior_rng, env.dim, curriculum)
             if cfg.device.startswith("cuda"):
                 torch.cuda.synchronize()
             training_seconds += time.perf_counter() - tic
@@ -296,7 +318,11 @@ def parse_config():
         if name in ("env", "method", "prior"):
             continue
         default = getattr(defaults, name)
-        kind = int if name in ("steps", "horizon") else type(default)
+        if isinstance(default, bool):
+            parser.add_argument("--" + name.replace("_", "-"),
+                                action=argparse.BooleanOptionalAction, default=default)
+            continue
+        kind = int if name in ("steps", "horizon") else (float if name == "radius" else type(default))
         parser.add_argument("--" + name.replace("_", "-"), type=kind, default=default)
     return Config(**vars(parser.parse_args()))
 
