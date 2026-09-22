@@ -94,7 +94,7 @@ SF parameterization입니다. twin 선택으로 생기는 finite-sample/approxim
 ## D-LEVER 구현과 비교 protocol
 
 기본적으로 episode 시작마다 behavior z는 원래 prior에서 추출합니다. `--tilted-behavior`를
-켜면 현재 cached 후보와 확률에서 behavior z도 추출합니다. cache가 생기기 전 warmup에는
+켜면 현재 cached 후보와 확률에서 behavior z도 비복원 추출합니다. cache가 생기기 전 warmup에는
 prior를 사용하며 behavior sampling 때문에 score나 cache를 새로 계산하지 않습니다.
 D-LEVER는 replay 학습 시 **critic와 actor 양쪽에 쓰는 z minibatch 분포**를 바꿉니다.
 두 업데이트는 같은 z를 씁니다.
@@ -113,7 +113,8 @@ D-LEVER는 replay 학습 시 **critic와 actor 양쪽에 쓰는 z minibatch 분�
 5. 첫 refresh는 `G=G_hat+lambda_ada*I`; 이후 regularized Gram에 EMA를 적용합니다.
 6. `ell_z=mu_z^T solve(G,mu_z)`와
    `q_i=(1-eta)/n + eta*ell_i/sum(ell)`를 계산합니다.
-7. B개 z를 **복원 추출**합니다. refresh 사이에는 후보와 확률을 cache합니다.
+7. B개 z를 **비복원 추출**하며 같은 cache 안에서는 선택한 index를 다시 쓰지 않습니다.
+   refresh 사이에는 후보와 확률을 cache합니다.
 
 Snapshot scoring, Gram, scores, sampling은 모두 no-grad입니다. Gram/solve는 float64입니다.
 Scoring용 torch RNG와 NumPy RNG를 분리해 candidate 평가가 behavior/learner RNG를 바꾸지 않습니다.

@@ -106,11 +106,10 @@ def evaluation_tasks(cfg, dim):
 
 def behavior_task(cfg, rng, dim, curriculum):
     """Sample one episode task, optionally from the existing curriculum cache."""
-    if cfg.tilted_behavior and curriculum.z is not None:
-        probs = curriculum.probs.detach().cpu().numpy().astype(np.float64)
-        probs /= probs.sum()
-        index = rng.choice(len(probs), p=probs)
-        return curriculum.z[index].detach().cpu().numpy().copy()
+    if cfg.tilted_behavior:
+        cached = curriculum.sample_behavior(rng)
+        if cached is not None:
+            return cached
     return sample_latents(rng, 1, dim, cfg.prior, cfg.radius)[0]
 
 

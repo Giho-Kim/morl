@@ -182,6 +182,7 @@ class Curriculum:
         self.radius, self.dim = radius, net.dim
         self.action_samples, self.score_seed = action_samples, score_seed
         self.gram = self.z = self.probs = None
+        self.training_remaining = self.behavior_remaining = None
         self.stats = {}
 
     @torch.no_grad()
@@ -203,13 +204,36 @@ class Curriculum:
                 (1 - self.alpha) * self.gram + self.alpha * regularized)
             self.scores, lev = design_scores(self.mu, self.gram, self.method)
             self.probs = mixture_probs(self.scores, 0 if self.method == "uniform" else self.eta)
+            self.training_remaining = np.arange(len(self.z))
+            self.behavior_remaining = np.arange(len(self.z))
             self.stats = dict(train_logdet=torch.linalg.slogdet(self.gram).logabsdet.item(),
                               mean_leverage=lev.mean().item(), adaptive_ridge=ada,
                               sampling_ess=(1 / self.probs.square().sum()).item())
-        # Replacement is intentional; do not differentiate through q_eta.
-        index = self.rng.choice(len(self.z), self.batch_size, replace=True,
-                                p=self.probs.cpu().numpy() / self.probs.sum().item())
+        if len(self.training_remaining) < self.batch_size:
+            self.training_remaining = np.arange(len(self.z))
+        remaining = self.training_remaining
+        probs = self.probs[torch.as_tensor(remaining, device=self.probs.device)]
+        probs = probs.detach().cpu().numpy().astype(np.float64)
+        probs = probs / probs.sum() if probs.sum() > 0 else None
+        positions = self.rng.choice(len(remaining), self.batch_size, replace=False, p=probs)
+        index = remaining[positions]
+        self.training_remaining = np.delete(remaining, positions)
         return self.z[torch.as_tensor(index, device=self.z.device)].detach()
+
+    def sample_behavior(self, rng):
+        """Draw one cached task without reuse until refresh or pool exhaustion."""
+        if self.z is None:
+            return None
+        if self.behavior_remaining is None or len(self.behavior_remaining) == 0:
+            self.behavior_remaining = np.arange(len(self.z))
+        remaining = self.behavior_remaining
+        probs = self.probs[torch.as_tensor(remaining, device=self.probs.device)]
+        probs = probs.detach().cpu().numpy().astype(np.float64)
+        probs = probs / probs.sum() if probs.sum() > 0 else None
+        position = rng.choice(len(remaining), p=probs)
+        index = remaining[position]
+        self.behavior_remaining = np.delete(remaining, position)
+        return self.z[index].detach().cpu().numpy().copy()
 
 
 class Replay:

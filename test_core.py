@@ -130,13 +130,14 @@ def test_automatic_temperature_tuning(discrete):
     assert all(np.isfinite(v) for v in metrics.values())
 
 
-def test_curriculum_snapshot_cache_ema_and_replacement():
+def test_curriculum_snapshot_cache_ema_and_without_replacement():
     torch.manual_seed(5)
     net = SFSAC(4, 2, 3, 8)
     curriculum = Curriculum(net, torch.zeros(2, 4), np.random.default_rng(7),
                              "d", "sphere", batch_size=16, multiplier=2,
                              alpha=.2, refresh=2)
     selected = curriculum.sample(net, 0)
+    assert len(torch.unique(selected, dim=0)) == len(selected)
     old_z, old_g = curriculum.z.clone(), curriculum.gram.clone()
     expected = curriculum.mu.T @ curriculum.mu / 32
     expected += curriculum.stats["adaptive_ridge"] * torch.eye(3)
@@ -146,7 +147,8 @@ def test_curriculum_snapshot_cache_ema_and_replacement():
     with torch.no_grad():
         for p in net.parameters():
             p.add_(.1)
-    curriculum.sample(net, 1)
+    second = curriculum.sample(net, 1)
+    assert len(torch.unique(torch.cat((selected, second)), dim=0)) == 2 * len(selected)
     assert torch.equal(old_z, curriculum.z)
     assert torch.equal(old_g, curriculum.gram)
     curriculum.sample(net, 2)
@@ -231,14 +233,20 @@ def test_mo_ant_uses_simplex_preferences_by_default():
 
 
 def test_tilted_behavior_uses_existing_cache_only():
-    from types import SimpleNamespace
     from train import Config, behavior_task
     cfg = Config(env="mo_ant", tilted_behavior=True, device="cpu").resolve()
+    net = SFSAC(4, 2, 3, 8)
+    curriculum = Curriculum(net, torch.zeros(2, 4), np.random.default_rng(7),
+                            "d", "simplex", batch_size=2, multiplier=2)
     cached_z = torch.tensor([[1., 2., 3.], [4., 5., 6.]])
-    curriculum = SimpleNamespace(z=cached_z, probs=torch.tensor([0., 1.]))
+    curriculum.z, curriculum.probs = cached_z, torch.tensor([.1, .9])
+    curriculum.behavior_remaining = np.arange(2)
     before = cached_z.clone()
-    selected = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)
-    assert np.array_equal(selected, np.array([4., 5., 6.], np.float32))
+    rng = np.random.default_rng(9)
+    first = behavior_task(cfg, rng, 3, curriculum)
+    second = behavior_task(cfg, rng, 3, curriculum)
+    assert np.array_equal(first, np.array([4., 5., 6.], np.float32))
+    assert np.array_equal(second, np.array([1., 2., 3.], np.float32))
     assert torch.equal(cached_z, before)
     curriculum.z = None
     fallback = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)
