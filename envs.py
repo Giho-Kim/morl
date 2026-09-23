@@ -13,11 +13,11 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 SPECS = {
     "fruit_tree": ("fruit-tree-v0", 7, "half_normal_simplex", 200_000),
     "minecart": ("minecart-v0", 1000, "simplex", 2_000_000),
-    "mo_hopper": ("mo-hopper-v5", 1000, "positive_sphere", 1_000_000),
+    "mo_hopper": ("mo-hopper-2obj-v5", 1000, "simplex", 1_000_000),
     "mo_ant": ("mo-ant-v5", 1000, "simplex", 1_000_000),
 }
 
-REWARD_DIMS = {"fruit_tree": 6, "minecart": 3, "mo_hopper": 3, "mo_ant": 3}
+REWARD_DIMS = {"fruit_tree": 6, "minecart": 3, "mo_hopper": 2, "mo_ant": 3}
 
 
 @contextmanager

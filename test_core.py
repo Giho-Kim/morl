@@ -301,18 +301,19 @@ def test_mo_ant_matches_official_vector_reward():
     official.close()
 
 
-@pytest.mark.parametrize("env", ["minecart", "mo_ant"])
-def test_minecart_and_mo_ant_use_sqrt_d_simplex_preferences_by_default(env):
+@pytest.mark.parametrize("env", ["minecart", "mo_hopper", "mo_ant"])
+def test_benchmarks_use_sqrt_d_simplex_preferences_by_default(env):
     from train import Config, evaluation_tasks
+    dim = 2 if env == "mo_hopper" else 3
     cfg = Config(env=env, device="cpu").resolve()
     assert cfg.prior == "simplex"
-    assert cfg.radius == pytest.approx(np.sqrt(3))
-    z = sample_latents(np.random.default_rng(3), 100, 3, cfg.prior, cfg.radius)
+    assert cfg.radius == pytest.approx(np.sqrt(dim))
+    z = sample_latents(np.random.default_rng(3), 100, dim, cfg.prior, cfg.radius)
     assert (z >= 0).all()
     assert np.allclose(z.sum(1), cfg.radius)
-    first = evaluation_tasks(cfg, 3)
-    second = evaluation_tasks(cfg, 3)
-    assert first.shape == (10 if env == "mo_ant" else 20, 3)
+    first = evaluation_tasks(cfg, dim)
+    second = evaluation_tasks(cfg, dim)
+    assert first.shape == (10 if env == "mo_ant" else 20, dim)
     assert np.array_equal(first, second)
     if env == "mo_ant":
         expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 3,
@@ -320,6 +321,26 @@ def test_minecart_and_mo_ant_use_sqrt_d_simplex_preferences_by_default(env):
         assert np.array_equal(first, expected)
     assert (first >= 0).all()
     assert np.allclose(first.sum(1), cfg.radius)
+
+
+def test_mo_hopper_matches_official_two_objective_reward():
+    benchmark = Benchmark("mo_hopper")
+    official = mo.make("mo-hopper-2obj-v5")
+    obs, _ = benchmark.reset(seed=17)
+    expected_obs, _ = official.reset(seed=17)
+    assert np.allclose(obs, expected_obs)
+    action = np.array([.2, -.3, .4], dtype=np.float32)
+    obs, reward, terminated, truncated, _ = benchmark.step(action)
+    expected_obs, expected_reward, expected_terminated, expected_truncated, info = official.step(action)
+    assert np.allclose(obs, expected_obs)
+    assert np.array_equal(reward, expected_reward)
+    shared = info["reward_ctrl"] + info["reward_survive"]
+    assert reward[0] == pytest.approx(info["x_velocity"] + shared)
+    assert reward[1] == pytest.approx(10 * info["z_distance_from_origin"] + shared)
+    assert terminated == expected_terminated
+    assert truncated == expected_truncated
+    benchmark.close()
+    official.close()
 
 
 def test_tilted_behavior_uses_existing_cache_only():
