@@ -47,7 +47,7 @@ class Config:
     temperature: float = .1
     embedding_action_samples: int = 2
     eval_every: int = 20_000
-    eval_tasks: int = 20
+    eval_tasks: int | None = None
     eval_episodes: int = 10
     eval_seed: int = 2027
     eval_ridge: float = 1e-3
@@ -64,6 +64,8 @@ class Config:
             self.prior = SPECS[self.env][2]
         if self.radius is None:
             self.radius = float(np.sqrt(REWARD_DIMS[self.env]))
+        if self.eval_tasks is None:
+            self.eval_tasks = 10 if self.env == "mo_ant" else 20
         if self.device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         positive = (self.steps, self.batch_size, self.multiplier, self.refresh,
@@ -97,7 +99,10 @@ def initial_bank(cfg):
 
 
 def evaluation_tasks(cfg, dim):
-    """Fixed benchmark preferences; simplex tasks use Riesz-energy directions."""
+    """Fixed benchmark preferences shared across methods and training seeds."""
+    if cfg.env == "mo_ant":
+        return sample_latents(np.random.default_rng(cfg.eval_seed), cfg.eval_tasks,
+                              dim, cfg.prior, cfg.radius)
     if cfg.prior == "simplex":
         tasks = get_reference_directions("energy", dim, cfg.eval_tasks,
                                          seed=cfg.eval_seed)
@@ -165,9 +170,12 @@ def evaluate(net, cfg, tasks, starts):
     predicted = embeddings(net, tensor(starts, device), tensor(tasks, device),
                            action_samples=cfg.embedding_action_samples, seed=cfg.eval_seed).cpu().numpy()
     gram = measured.T @ measured / len(tasks) + cfg.eval_ridge * np.eye(net.dim)
-    tail_n = max(1, int(np.ceil(.1 * len(tasks))))
+    sorted_utility = np.sort(utility_iqm)
+    decile_n = max(1, int(np.ceil(.1 * len(tasks))))
+    quartile_n = max(1, int(np.ceil(.25 * len(tasks))))
     metrics = dict(mean_return=float(utility_iqm.mean()),
-                   worst_decile_return=float(np.sort(utility_iqm)[:tail_n].mean()),
+                   worst_decile_return=float(sorted_utility[:decile_n].mean()),
+                   worst_quartile_return=float(sorted_utility[:quartile_n].mean()),
                    min_return=float(utility_iqm.min()),
                    rollout_logdet=float(np.linalg.slogdet(gram)[1]),
                    rollout_min_eigenvalue=float(np.linalg.eigvalsh(gram)[0]),
@@ -329,7 +337,7 @@ def parse_config():
             parser.add_argument("--" + name.replace("_", "-"),
                                 action=argparse.BooleanOptionalAction, default=default)
             continue
-        kind = int if name in ("steps", "horizon") else (float if name == "radius" else type(default))
+        kind = int if name in ("steps", "horizon", "eval_tasks") else (float if name == "radius" else type(default))
         parser.add_argument("--" + name.replace("_", "-"), type=kind, default=default)
     return Config(**vars(parser.parse_args()))
 

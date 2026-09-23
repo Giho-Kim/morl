@@ -312,8 +312,12 @@ def test_minecart_and_mo_ant_use_sqrt_d_simplex_preferences_by_default(env):
     assert np.allclose(z.sum(1), cfg.radius)
     first = evaluation_tasks(cfg, 3)
     second = evaluation_tasks(cfg, 3)
-    assert first.shape == (20, 3)
+    assert first.shape == (10 if env == "mo_ant" else 20, 3)
     assert np.array_equal(first, second)
+    if env == "mo_ant":
+        expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 3,
+                                  cfg.prior, cfg.radius)
+        assert np.array_equal(first, expected)
     assert (first >= 0).all()
     assert np.allclose(first.sum(1), cfg.radius)
 
@@ -347,13 +351,13 @@ def test_iqm_of_ten_rollouts_averages_central_six():
 
 def test_evaluation_preserves_rng_and_repeats():
     from train import Config, evaluate, initial_bank, make_model
-    cfg = Config(env="minecart", horizon=10, eval_tasks=2, eval_episodes=1,
+    cfg = Config(env="minecart", horizon=10, eval_tasks=10, eval_episodes=1,
                  hidden=8, steps=10, device="cpu").resolve()
     with isolated_global_rng(20):
         env = Benchmark(cfg.env, horizon=cfg.horizon)
         net = make_model(cfg, env)
         env.close()
-    z = sample_latents(np.random.default_rng(5), 2, 3, cfg.prior)
+    z = sample_latents(np.random.default_rng(5), 10, 3, cfg.prior)
     start = initial_bank(cfg)
     np.random.seed(123)
     random.seed(123)
@@ -370,8 +374,12 @@ def test_evaluation_preserves_rng_and_repeats():
     assert random.random() == expected_py
     second, repeated = evaluate(net, cfg, z, start)
     assert first == second
+    assert first["worst_quartile_return"] == pytest.approx(
+        np.sort(arrays["utility_iqm"])[:3].mean())
+    assert first["worst_decile_return"] == pytest.approx(
+        arrays["utility_iqm"].min())
     assert np.array_equal(arrays["returns"], repeated["returns"])
-    assert arrays["utility_iqm"].shape == (2,)
+    assert arrays["utility_iqm"].shape == (10,)
 
 
 def test_safe_checkpoint_roundtrip(tmp_path):

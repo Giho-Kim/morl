@@ -185,18 +185,23 @@ argmax, 연속 환경은 Gaussian mean을 tanh 변환한 action입니다. 학습
 stochastic policy를 그대로 사용합니다.
 평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
 
-기본 평가는 20개 weight × weight당 10 rollouts입니다. 각 weight의 scalar utility는
+기본 평가는 Ant는 고정 seed로 무작위 추출한 10개 weight, 다른 환경은 20개 weight를
+사용하며 weight당 10 rollouts입니다. 각 weight의 scalar utility는
 하위/상위 25%를 제외한 IQM(10개 중 중앙 6개 평균)으로 집계하고, weight별 IQM은 평가
-`.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 이 20개 IQM의 평균입니다.
-simplex 환경의 평가 weight는 MORL-Baselines와
+`.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 weight별 IQM의 평균입니다.
+Ant의 평가 weight는 학습 prior에서 `eval_seed`로 한 번 뽑아 모든 방법과 seed에 고정합니다.
+다른 simplex 환경의 평가 weight는 MORL-Baselines와
 같은 Riesz s-Energy 방식으로 simplex 위에 고르게 고정합니다. 학습 task는 기존 prior와
 curriculum에 따라 별도로 샘플됩니다. 원래 reward만으로:
 
-- weight별 rollout IQM 전체 저장과 그 IQM들의 mean / worst-decile / minimum 로그
+- weight별 rollout IQM 전체 저장과 그 IQM들의 mean / worst-decile / worst-quartile / minimum 로그
 - rollout으로 측정한 mu의 logdet / minimum eigenvalue
 - predicted mu와 rollout mu 사이 RMSE
 - 길이, timeout fraction, evaluation transition 수
 - Fruit Tree 도달 leaf 수
+
+Ant의 weight가 10개일 때 worst-decile은 minimum과 같고, worst-quartile은 낮은 3개
+weight의 IQM 평균입니다.
 
 `rollout_logdet`는 일정한 absolute ridge를 사용합니다. 훈련 EMA logdet와 구별합니다.
 RMSE에는 서로 다른 reset 표본 bank와 action/rollout Monte Carlo 오차도 포함됩니다.
