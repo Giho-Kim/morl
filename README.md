@@ -9,10 +9,10 @@
 | `fruit_tree` | `fruit-tree-v0` | 이산 2 / categorical | 6 | 200,000 |
 | `minecart` | `minecart-v0` | 이산 6 / categorical | 3 | 2,000,000 |
 | `mo_hopper` | `mo-hopper-2obj-v5` | 연속 3 / tanh Gaussian | 2 | 1,000,000 |
-| `mo_ant` | `mo-ant-v5` | 연속 8 / tanh Gaussian | 3 | 1,000,000 |
+| `mo_ant` | `mo-ant-2obj-v5` | 연속 8 / tanh Gaussian | 2 | 1,000,000 |
 
-Four-Room은 네 환경 구성에서 제외했습니다. Hopper는 공식 2-objective v5,
-Ant는 공식 3-objective v5입니다.
+Four-Room은 네 환경 구성에서 제외했습니다. Hopper와 Ant는 공식 2-objective v5
+환경입니다.
 Fruit Tree 영양소 벡터를 그대로 쓰며, leaf one-hot reward로 바꾸지 않습니다.
 
 ## 설치와 실행
@@ -152,8 +152,10 @@ Fruit Tree는 원 FTN 구현과 같은 half-normal 방향을 L1 정규화하는
 따라서 모든 Fruit Tree task의 weight 합은 `sqrt(6)`으로 일정합니다. MO-Hopper는
 공식 2-objective 환경에서 `Dirichlet(1,1)` simplex를 사용해 weight 합이 `sqrt(2)`입니다.
 전진 속도와 점프 높이가 두 목표이며, control cost와 survival 보상은 두 성분에 공통으로
-더해져 모든 task에서 계수가 일정합니다. Minecart와 MO-Ant는 `Dirichlet(1,1,1)`
-simplex를 사용하고 weight 합은 `sqrt(3)`입니다.
+더해져 모든 task에서 계수가 일정합니다. Minecart는 `Dirichlet(1,1,1)` simplex를
+사용하고 weight 합은 `sqrt(3)`입니다. Ant는 공식 2-objective 환경에서
+`Dirichlet(1,1)` simplex를 사용하며 weight 합은 `sqrt(2)`입니다. x/y 속도가 목표이고
+control cost, survival, contact 보상은 두 성분에 공통으로 더해집니다.
 
 ```bash
 # 모든 환경을 simplex로 강제하는 ablation:
@@ -165,8 +167,7 @@ python run_suite.py --prior sphere --output sphere_runs
 `--radius` 기본값은 reward 차원 `d`의 제곱근 `sqrt(d)`입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
 모든 좌표는 공식 벡터 reward 그대로이며 보상 정규화·클리핑·shaping은 없습니다.
 simplex prior를 쓰는 Ant에서는 x/y 양의 방향에 주로 가치를 주므로 전방향 이동 suite는 아닙니다.
-Ant의 세 weight의 합은 기본적으로 `sqrt(3)`으로 고정되며, control-cost objective의
-weight는 음수가 되지 않습니다. `--radius 1`을 지정하면 합이 1인 표준 unit simplex가
+Ant의 두 weight의 합은 기본적으로 `sqrt(2)`로 고정됩니다. `--radius 1`을 지정하면 합이 1인 표준 unit simplex가
 됩니다. 전체 구면은 음의 비용 가중치까지 포함하므로 그 task family 의미를 구별해야 합니다.
 
 Fruit Tree는 state 입력만 one-hot 인코딩합니다. 나머지는 공식 raw observation을 사용합니다.

@@ -286,15 +286,18 @@ def test_time_limit_truncates_without_termination():
 
 def test_mo_ant_matches_official_vector_reward():
     benchmark = Benchmark("mo_ant")
-    official = mo.make("mo-ant-v5")
+    official = mo.make("mo-ant-2obj-v5")
     obs, _ = benchmark.reset(seed=17)
     expected_obs, _ = official.reset(seed=17)
     assert np.allclose(obs, expected_obs)
     action = np.linspace(-.8, .8, 8, dtype=np.float32)
-    obs, reward, terminated, truncated, _ = benchmark.step(action)
+    obs, reward, terminated, truncated, info = benchmark.step(action)
     expected_obs, expected_reward, expected_terminated, expected_truncated, _ = official.step(action)
     assert np.allclose(obs, expected_obs)
     assert np.array_equal(reward, expected_reward)
+    shared = info["reward_ctrl"] + info["reward_survive"] + info["reward_contact"]
+    assert reward[0] == pytest.approx(info["x_velocity"] + shared)
+    assert reward[1] == pytest.approx(info["y_velocity"] + shared)
     assert terminated == expected_terminated
     assert truncated == expected_truncated
     benchmark.close()
@@ -304,7 +307,7 @@ def test_mo_ant_matches_official_vector_reward():
 @pytest.mark.parametrize("env", ["minecart", "mo_hopper", "mo_ant"])
 def test_benchmarks_use_sqrt_d_simplex_preferences_by_default(env):
     from train import Config, evaluation_tasks
-    dim = 2 if env == "mo_hopper" else 3
+    dim = 2 if env in ("mo_hopper", "mo_ant") else 3
     cfg = Config(env=env, device="cpu").resolve()
     assert cfg.prior == "simplex"
     assert cfg.radius == pytest.approx(np.sqrt(dim))
@@ -316,7 +319,7 @@ def test_benchmarks_use_sqrt_d_simplex_preferences_by_default(env):
     assert first.shape == (10 if env == "mo_ant" else 20, dim)
     assert np.array_equal(first, second)
     if env == "mo_ant":
-        expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 3,
+        expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 2,
                                   cfg.prior, cfg.radius)
         assert np.array_equal(first, expected)
     assert (first >= 0).all()
