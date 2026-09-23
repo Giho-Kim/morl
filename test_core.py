@@ -131,7 +131,7 @@ def test_automatic_temperature_tuning(discrete):
     assert all(np.isfinite(v) for v in metrics.values())
 
 
-def test_curriculum_snapshot_cache_ema_and_without_replacement():
+def test_curriculum_snapshot_cache_ema_and_per_batch_without_replacement():
     torch.manual_seed(5)
     net = SFSAC(4, 2, 3, 8)
     curriculum = Curriculum(net, torch.zeros(2, 4), np.random.default_rng(7),
@@ -149,7 +149,8 @@ def test_curriculum_snapshot_cache_ema_and_without_replacement():
         for p in net.parameters():
             p.add_(.1)
     second = curriculum.sample(net, 1)
-    assert len(torch.unique(torch.cat((selected, second)), dim=0)) == 2 * len(selected)
+    assert len(torch.unique(second, dim=0)) == len(second)
+    assert len(torch.unique(torch.cat((selected, second)), dim=0)) < 2 * len(selected)
     assert torch.equal(old_z, curriculum.z)
     assert torch.equal(old_g, curriculum.gram)
     curriculum.sample(net, 2)
@@ -225,15 +226,32 @@ def test_td_curriculum_uses_td_scores_and_mixture():
     assert torch.all(curriculum.probs >= .25 / 8)
 
 
-@pytest.mark.parametrize("prior", ["sphere", "positive_sphere", "simplex"])
+@pytest.mark.parametrize("prior", ["sphere", "positive_sphere",
+                                    "half_normal_simplex", "simplex"])
 def test_latent_domains(prior):
     z = sample_latents(np.random.default_rng(1), 100, 6, prior)
-    if prior == "simplex":
+    if prior in ("simplex", "half_normal_simplex"):
         assert np.allclose(z.sum(1), 1)
     else:
         assert np.allclose(np.linalg.norm(z, axis=1), 1)
     if prior != "sphere":
         assert (z >= 0).all()
+
+
+def test_fruit_tree_uses_scaled_original_half_normal_preferences():
+    from train import Config, evaluation_tasks
+    cfg = Config(env="fruit_tree", device="cpu").resolve()
+    assert cfg.prior == "half_normal_simplex"
+    assert cfg.radius == pytest.approx(np.sqrt(6))
+    rng_a, rng_b = np.random.default_rng(17), np.random.default_rng(17)
+    actual = sample_latents(rng_a, 100, 6, cfg.prior, cfg.radius)
+    raw = np.abs(rng_b.normal(size=(100, 6)))
+    expected = cfg.radius * raw / raw.sum(axis=1, keepdims=True)
+    assert np.allclose(actual, expected)
+    assert np.allclose(actual.sum(1), cfg.radius)
+    first, second = evaluation_tasks(cfg, 6), evaluation_tasks(cfg, 6)
+    assert np.array_equal(first, second)
+    assert np.allclose(first.sum(1), cfg.radius)
 
 
 @pytest.mark.parametrize("name", ["fruit_tree", "minecart", "mo_hopper", "mo_ant"])
@@ -308,13 +326,12 @@ def test_tilted_behavior_uses_existing_cache_only():
                             "d", "simplex", batch_size=2, multiplier=2)
     cached_z = torch.tensor([[1., 2., 3.], [4., 5., 6.]])
     curriculum.z, curriculum.probs = cached_z, torch.tensor([.1, .9])
-    curriculum.behavior_remaining = np.arange(2)
     before = cached_z.clone()
     rng = np.random.default_rng(9)
     first = behavior_task(cfg, rng, 3, curriculum)
     second = behavior_task(cfg, rng, 3, curriculum)
     assert np.array_equal(first, np.array([4., 5., 6.], np.float32))
-    assert np.array_equal(second, np.array([1., 2., 3.], np.float32))
+    assert np.array_equal(second, np.array([4., 5., 6.], np.float32))
     assert torch.equal(cached_z, before)
     curriculum.z = None
     fallback = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)

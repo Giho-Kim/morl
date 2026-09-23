@@ -94,7 +94,8 @@ SF parameterization입니다. twin 선택으로 생기는 finite-sample/approxim
 ## D-LEVER 구현과 비교 protocol
 
 기본적으로 episode 시작마다 behavior z는 원래 prior에서 추출합니다. `--tilted-behavior`를
-켜면 현재 cached 후보와 확률에서 behavior z도 비복원 추출합니다. cache가 생기기 전 warmup에는
+켜면 현재 cached 후보와 확률에서 behavior z를 episode마다 독립 추출합니다. 따라서 episode 간에는
+같은 후보가 반복될 수 있습니다. cache가 생기기 전 warmup에는
 prior를 사용하며 behavior sampling 때문에 score나 cache를 새로 계산하지 않습니다.
 D-LEVER는 replay 학습 시 **critic와 actor 양쪽에 쓰는 z minibatch 분포**를 바꿉니다.
 두 업데이트는 같은 z를 씁니다.
@@ -113,7 +114,8 @@ D-LEVER는 replay 학습 시 **critic와 actor 양쪽에 쓰는 z minibatch 분�
 5. 첫 refresh는 `G=G_hat+lambda_ada*I`; 이후 regularized Gram에 EMA를 적용합니다.
 6. `ell_z=mu_z^T solve(G,mu_z)`와
    `q_i=(1-eta)/n + eta*ell_i/sum(ell)`를 계산합니다.
-7. B개 z를 **비복원 추출**하며 같은 cache 안에서는 선택한 index를 다시 쓰지 않습니다.
+7. 매 update마다 전체 cached pool에서 B개 z를 **batch 내 비복원 추출**합니다.
+   다음 update에는 전체 pool을 다시 사용하므로 같은 index가 반복될 수 있습니다.
    refresh 사이에는 후보와 확률을 cache합니다.
 
 Snapshot scoring, Gram, scores, sampling은 모두 no-grad입니다. Gram/solve는 float64입니다.
@@ -144,9 +146,11 @@ transition probe(`--td-probes`, 기본 8개)로 평가하고, 두 critic의 scal
 
 ## Task prior와 환경 의미
 
-Fruit Tree와 MO-Hopper는 `positive_sphere`를 사용합니다. Minecart와 MO-Ant는 비음수인
-`simplex`를 기본값으로 사용합니다. 세 차원의 weight는 `Dirichlet(1,1,1)`에서 샘플한 뒤
-기본 radius `sqrt(3)`을 곱하므로 합은 `sqrt(3)`이고, 이 scaled simplex 위에서 균등합니다.
+Fruit Tree는 원 FTN 구현과 같은 half-normal 방향을 L1 정규화하는
+`half_normal_simplex`를 사용합니다: `z = sqrt(6) * abs(N(0,I)) / ||N(0,I)||_1`.
+따라서 모든 Fruit Tree task의 weight 합은 `sqrt(6)`으로 일정합니다. MO-Hopper는
+`positive_sphere`를 사용합니다. Minecart와 MO-Ant는 `Dirichlet(1,1,1)`을 사용하는
+`simplex`가 기본이며, 기본 radius를 곱한 weight 합은 `sqrt(3)`입니다.
 
 ```bash
 # 모든 환경을 simplex로 강제하는 ablation:

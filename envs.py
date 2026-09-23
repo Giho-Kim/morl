@@ -11,7 +11,7 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 SPECS = {
-    "fruit_tree": ("fruit-tree-v0", 7, "positive_sphere", 200_000),
+    "fruit_tree": ("fruit-tree-v0", 7, "half_normal_simplex", 200_000),
     "minecart": ("minecart-v0", 1000, "simplex", 2_000_000),
     "mo_hopper": ("mo-hopper-v5", 1000, "positive_sphere", 1_000_000),
     "mo_ant": ("mo-ant-v5", 1000, "simplex", 1_000_000),

@@ -318,7 +318,8 @@ def parse_config():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", choices=SPECS, default="fruit_tree")
     parser.add_argument("--method", choices=("uniform", "d", "a", "e", "td"), default="d")
-    parser.add_argument("--prior", choices=("sphere", "positive_sphere", "simplex"))
+    parser.add_argument("--prior", choices=("sphere", "positive_sphere",
+                                             "half_normal_simplex", "simplex"))
     defaults = Config()
     for name in Config.__dataclass_fields__:
         if name in ("env", "method", "prior"):
