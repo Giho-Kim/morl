@@ -41,12 +41,14 @@ python run_suite.py --seeds 0 1 2 3 4 --output runs_sfsac
 ```bash
 python train.py --env mo_ant --method d --seed 0 --output ant_runs
 python run_suite.py --methods uniform d a e td --seeds 0 1 2 3 4 --output all_methods
-python run_suite.py --methods uniform d --seeds 0 --steps 20000 --eval-every 10000 --output pilot
+python run_suite.py --methods uniform d --seeds 0 --steps 20000 --learning-starts 1000 --eval-every 10000 --output pilot
 ```
 
 각 run을 별도 프로세스로 순차 실행합니다. `--device cuda` 지정도 가능합니다.
 기존 run 폴더를 덮어쓰지 않습니다. smoke는 160 steps, 짧은 horizon, 작은 모델이므로
 수렴·성능 실험이 아닙니다. 기본 학습 예산과 hyperparameter도 성능을 튜닝한 값은 아닙니다.
+기본 학습 시작 시점과 평가 간격은 각각 50,000 environment steps입니다
+(`--learning-starts 50000`, `--eval-every 50000`).
 
 ## SF-SAC 정의: 보상 SF와 엔트로피를 분리
 
@@ -186,7 +188,7 @@ argmax, 연속 환경은 Gaussian mean을 tanh 변환한 action입니다. 학습
 stochastic policy를 그대로 사용합니다.
 평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
 
-기본 평가는 Ant는 고정 seed로 무작위 추출한 10개 weight, Hopper는 20개 weight를
+기본 평가는 Ant와 Hopper 모두 고정 seed로 무작위 추출한 10개 weight를
 사용하며 weight당 10 rollouts입니다. 각 weight의 scalar utility는
 하위/상위 25%를 제외한 IQM(10개 중 중앙 6개 평균)으로 집계하고, weight별 IQM은 평가
 `.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 weight별 IQM의 평균입니다.
@@ -211,8 +213,8 @@ runs_sfsac/<env>/<method>/seed_<n>/
   config.json, versions.json
   eval_tasks.npy, initial_states.npy
   metrics.csv
-  eval_000005000.npz
-  design_000005000.npz
+  eval_000050000.npz
+  design_000050000.npz
   latest.pt
 ```
 

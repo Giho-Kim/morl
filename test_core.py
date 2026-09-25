@@ -294,6 +294,8 @@ def test_benchmarks_use_unit_positive_sphere_with_fixed_common_weight(env):
     from train import Config, evaluation_tasks
     dim = 3
     cfg = Config(env=env, device="cpu").resolve()
+    assert cfg.eval_every == 50_000
+    assert cfg.learning_starts == 50_000
     assert cfg.prior == "fixed_common_positive_sphere"
     assert cfg.radius == pytest.approx(1.)
     z = sample_latents(np.random.default_rng(3), 100, dim, cfg.prior, cfg.radius)
@@ -302,7 +304,7 @@ def test_benchmarks_use_unit_positive_sphere_with_fixed_common_weight(env):
     assert np.array_equal(z[:, 2], np.ones(100))
     first = evaluation_tasks(cfg, dim)
     second = evaluation_tasks(cfg, dim)
-    assert first.shape == (10 if env == "mo_ant" else 20, dim)
+    assert first.shape == (10, dim)
     assert np.array_equal(first, second)
     if env == "mo_ant":
         expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 3,

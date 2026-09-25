@@ -41,12 +41,12 @@ class Config:
     lr: float = 3e-4
     tau: float = .005
     replay_size: int = 1_000_000
-    learning_starts: int = 20_000
+    learning_starts: int = 50_000
     train_every: int = 1
     tilted_behavior: bool = False
     temperature: float = .1
     embedding_action_samples: int = 2
-    eval_every: int = 20_000
+    eval_every: int = 50_000
     eval_tasks: int | None = None
     eval_episodes: int = 10
     eval_seed: int = 2027
@@ -73,7 +73,7 @@ class Config:
             self.radius = (1.0 if self.reward_layout == "directional_common_3d"
                            else float(np.sqrt(2)))
         if self.eval_tasks is None:
-            self.eval_tasks = 10 if self.env == "mo_ant" else 20
+            self.eval_tasks = 10
         if self.device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         positive = (self.steps, self.batch_size, self.multiplier, self.refresh,
