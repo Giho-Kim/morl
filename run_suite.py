@@ -7,8 +7,8 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--envs", nargs="+", default=["fruit_tree", "minecart", "mo_hopper", "mo_ant"],
-                        choices=["fruit_tree", "minecart", "mo_hopper", "mo_ant"])
+    parser.add_argument("--envs", nargs="+", default=["mo_hopper", "mo_ant"],
+                        choices=["mo_hopper", "mo_ant"])
     parser.add_argument("--methods", nargs="+", default=["uniform", "d"],
                         choices=["uniform", "d", "a", "e", "td"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])

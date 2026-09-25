@@ -11,8 +11,10 @@
     {\large\bf Conditional Successor-Feature Soft Actor--Critic}
 \end{center}
 
-The environment emits a vector reward $\boldsymbol\phi_t\in\mathbb{R}^d$.
-A task is specified by a preference vector $\mathbf z\in\mathbb{R}^d$, with
+The official Ant/Hopper environments emit two reward components, each containing
+the same survival and control terms (also contact cost for Ant). We decompose
+each observed transition into $\boldsymbol\phi_t=(d_{1,t},d_{2,t},c_t)\in\mathbb{R}^3$.
+A task uses $\mathbf z=(u_1,u_2,1)$, where $u\geq0$ and $\|u\|_2=1$, with
 scalar reward $r_{\mathbf z,t}=\mathbf z^\top\boldsymbol\phi_t$.  One shared
 actor $\pi_\theta(a\mid s,\mathbf z)$ and two critics are trained across all
 preferences.  Because the dynamics and vector reward do not depend on

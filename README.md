@@ -1,19 +1,15 @@
-# D-LEVER with conditional SF-SAC — four MO benchmarks
+# D-LEVER with conditional SF-SAC — Ant and Hopper
 
 기존 SF Double-Q 구현을 conditional SF-SAC로 변경한 모델 프리 실험 코드입니다.
-네 환경 모두 actor `pi(a|s,z)`와 twin SF critics `psi_i(s,a,z)`를 학습합니다.
+두 환경 모두 actor `pi(a|s,z)`와 twin SF critics `psi_i(s,a,z)`를 학습합니다.
 환경마다 별개의 conditional model을 학습하며, 한 환경 내 모든 z가 모델을 공유합니다.
 
 | CLI 환경 | 공식 환경 ID | 행동 / actor | 보상 차원 | 기본 steps |
 |---|---|---|---:|---:|
-| `fruit_tree` | `fruit-tree-v0` | 이산 2 / categorical | 6 | 200,000 |
-| `minecart` | `minecart-v0` | 이산 6 / categorical | 3 | 2,000,000 |
-| `mo_hopper` | `mo-hopper-2obj-v5` | 연속 3 / tanh Gaussian | 2 | 1,000,000 |
-| `mo_ant` | `mo-ant-2obj-v5` | 연속 8 / tanh Gaussian | 2 | 1,000,000 |
+| `mo_hopper` | `mo-hopper-2obj-v5` | 연속 3 / tanh Gaussian | 공식 2D → 학습 feature 3D | 1,000,000 |
+| `mo_ant` | `mo-ant-2obj-v5` | 연속 8 / tanh Gaussian | 공식 2D → 학습 feature 3D | 1,000,000 |
 
-Four-Room은 네 환경 구성에서 제외했습니다. Hopper와 Ant는 공식 2-objective v5
-환경입니다.
-Fruit Tree 영양소 벡터를 그대로 쓰며, leaf one-hot reward로 바꾸지 않습니다.
+Hopper와 Ant는 공식 2-objective v5 환경입니다.
 
 ## 설치와 실행
 
@@ -34,7 +30,7 @@ python run_suite.py --smoke --seeds 0 --output smoke_sfsac
 MuJoCo Python 패키지는 requirements에 포함됩니다. 별도 MuJoCo license나 rendering은
 필요하지 않습니다. Linux에서 `libGL.so.1` 관련 import 오류가 있으면 시스템 `libgl1`이 필요합니다.
 
-**네 환경 × Uniform/D-LEVER × 5 seeds:**
+**두 환경 × Uniform/D-LEVER × 5 seeds:**
 
 ```bash
 python run_suite.py --seeds 0 1 2 3 4 --output runs_sfsac
@@ -54,7 +50,8 @@ python run_suite.py --methods uniform d --seeds 0 --steps 20000 --eval-every 100
 
 ## SF-SAC 정의: 보상 SF와 엔트로피를 분리
 
-환경의 벡터 보상 `phi_t`에 대해 `r_z = z^T phi_t`를 사용합니다.
+공식 환경이 반환하는 2D 보상을 매 transition에서 `[방향 1, 방향 2, 공통항]`의
+3D feature `phi_t`로 분해하고 `r_z = z^T phi_t`를 사용합니다.
 모델, transition table, 환경 내부 reward table, DP, scripted policy 없이 `reset/step` 경험과
 replay TD로만 학습합니다. 초기 상태 bank는 별도 reset 표본입니다.
 
@@ -147,41 +144,41 @@ transition probe(`--td-probes`, 기본 8개)로 평가하고, 두 critic의 scal
 
 ## Task prior와 환경 의미
 
-Fruit Tree는 원 FTN 구현과 같은 half-normal 방향을 L1 정규화하는
-`half_normal_simplex`를 사용합니다: `z = sqrt(6) * abs(N(0,I)) / ||N(0,I)||_1`.
-따라서 모든 Fruit Tree task의 weight 합은 `sqrt(6)`으로 일정합니다. MO-Hopper는
-공식 2-objective 환경에서 `Dirichlet(1,1)` simplex를 사용해 weight 합이 `sqrt(2)`입니다.
-전진 속도와 점프 높이가 두 목표이며, control cost와 survival 보상은 두 성분에 공통으로
-더해져 모든 task에서 계수가 일정합니다. Minecart는 `Dirichlet(1,1,1)` simplex를
-사용하고 weight 합은 `sqrt(3)`입니다. Ant는 공식 2-objective 환경에서
-`Dirichlet(1,1)` simplex를 사용하며 weight 합은 `sqrt(2)`입니다. x/y 속도가 목표이고
-control cost, survival, contact 보상은 두 성분에 공통으로 더해집니다.
+두 환경 모두 공식 2-objective v5 환경을 그대로 실행합니다. 단, 공식 2D 벡터
+보상은 공통항이 각 성분에 이미 더해져 있으므로, 학습 시 `info`에 기록된 값으로
+다음 3D transition feature를 만듭니다:
+
+```text
+Ant:    phi = [x_velocity, y_velocity, reward_ctrl + reward_survive + reward_contact]
+Hopper: phi = [x_velocity, 10*z_distance_from_origin, reward_ctrl + reward_survive]
+```
+
+task는 `z=[u1,u2,1]`이며 `u1,u2 >= 0`, `u1²+u2²=1`인 양의 단위 구면에서
+방향 가중치 `u`를 뽑습니다. 따라서 `r_z=u1*phi1+u2*phi2+phi3`이고 공통항 계수는
+모든 task에서 1입니다. 축 방향 `[1,0,1]`, `[0,1,1]`은 각각 공식 2D 보상의
+첫째, 둘째 성분을 재현합니다. `--radius` 기본값은 **1**이며 방향 부분의 L2 반지름입니다.
 
 ```bash
-# 모든 환경을 simplex로 강제하는 ablation:
+# 방향 가중치만 simplex로 바꾸는 ablation (공통항 계수는 계속 1):
 python run_suite.py --prior simplex --eta .9 --seeds 0 1 2 3 4 --output simplex_runs
-# 전체 구면:
+# 방향 가중치에 음수도 허용하는 전체 구면:
 python run_suite.py --prior sphere --output sphere_runs
 ```
 
-`--radius` 기본값은 reward 차원 `d`의 제곱근 `sqrt(d)`입니다. prior가 바뀌면 평가 task 분포도 바뀝니다.
-모든 좌표는 공식 벡터 reward 그대로이며 보상 정규화·클리핑·shaping은 없습니다.
-simplex prior를 쓰는 Ant에서는 x/y 양의 방향에 주로 가치를 주므로 전방향 이동 suite는 아닙니다.
-Ant의 두 weight의 합은 기본적으로 `sqrt(2)`로 고정됩니다. `--radius 1`을 지정하면 합이 1인 표준 unit simplex가
-됩니다. 전체 구면은 음의 비용 가중치까지 포함하므로 그 task family 의미를 구별해야 합니다.
+prior가 바뀌면 평가 task 분포도 바뀝니다. 공식 보상 항의 크기를 바꾸지 않고
+공통항만 별도 feature로 분리합니다. 양의 구면은 x/y 양의 방향을 선호하므로 Ant의
+전방향 이동 suite는 아닙니다. `--prior sphere`는 방향 보상에 음수 가중치도 허용하지만
+공통항 계수는 여전히 1입니다.
 
-Fruit Tree는 state 입력만 one-hot 인코딩합니다. 나머지는 공식 raw observation을 사용합니다.
-Fruit Tree 기본 horizon은 depth=6, 나머지는 1,000입니다. 환경 termination에서는
+두 환경 모두 공식 raw observation을 사용하며 기본 horizon은 1,000입니다. 환경 termination에서는
 bootstrap을 끄고, time-limit truncation에서는 episode를 reset하되 bootstrap은 유지합니다.
 observation에 별도의 시간 좌표를 추가하지 않습니다.
-Minecart 한 step은 공식 action-repeat 단위입니다.
 
 ## 평가 / 체크포인트
 
 ```bash
 python plot.py runs_sfsac --output plots
 python evaluate.py runs_sfsac/mo_ant/d/seed_0/latest.pt --output ant_heldout.npz
-python fruit_reference.py runs_sfsac/fruit_tree/d/seed_0
 ```
 
 평가에는 학습된 SAC policy의 **deterministic action**을 사용합니다. 이산 환경은 categorical
@@ -189,20 +186,18 @@ argmax, 연속 환경은 Gaussian mean을 tanh 변환한 action입니다. 학습
 stochastic policy를 그대로 사용합니다.
 평가 중 업데이트는 없습니다. task/episode seed를 고정하고 Python/NumPy/torch RNG를 복구합니다.
 
-기본 평가는 Ant는 고정 seed로 무작위 추출한 10개 weight, 다른 환경은 20개 weight를
+기본 평가는 Ant는 고정 seed로 무작위 추출한 10개 weight, Hopper는 20개 weight를
 사용하며 weight당 10 rollouts입니다. 각 weight의 scalar utility는
 하위/상위 25%를 제외한 IQM(10개 중 중앙 6개 평균)으로 집계하고, weight별 IQM은 평가
 `.npz`의 `utility_iqm`에 모두 저장합니다. `mean_return` 로그는 weight별 IQM의 평균입니다.
 Ant의 평가 weight는 학습 prior에서 `eval_seed`로 한 번 뽑아 모든 방법과 seed에 고정합니다.
-다른 simplex 환경의 평가 weight는 MORL-Baselines와
-같은 Riesz s-Energy 방식으로 simplex 위에 고르게 고정합니다. 학습 task는 기존 prior와
-curriculum에 따라 별도로 샘플됩니다. 원래 reward만으로:
+Hopper의 평가 weight도 같은 양의 구면 prior에서 고정 seed로 뽑습니다. 학습 task는 기존 prior와
+curriculum에 따라 별도로 샘플됩니다. 위의 고정 공통항 보상으로, entropy bonus 없이:
 
 - weight별 rollout IQM 전체 저장과 그 IQM들의 mean / worst-decile / worst-quartile / minimum 로그
 - rollout으로 측정한 mu의 logdet / minimum eigenvalue
 - predicted mu와 rollout mu 사이 RMSE
 - 길이, timeout fraction, evaluation transition 수
-- Fruit Tree 도달 leaf 수
 
 Ant의 weight가 10개일 때 worst-decile은 minimum과 같고, worst-quartile은 낮은 3개
 weight의 IQM 평균입니다.
@@ -210,8 +205,6 @@ weight의 IQM 평균입니다.
 `rollout_logdet`는 일정한 absolute ridge를 사용합니다. 훈련 EMA logdet와 구별합니다.
 RMSE에는 서로 다른 reset 표본 bank와 action/rollout Monte Carlo 오차도 포함됩니다.
 Reward 크기가 다른 task 사이 raw lower-tail return은 lower-tail regret이 아닙니다.
-`fruit_reference.py`는 평가 전용 leaf enumeration으로 regret을 계산합니다. 학습 코드는
-reference를 import하지 않습니다.
 
 ```text
 runs_sfsac/<env>/<method>/seed_<n>/
@@ -225,17 +218,15 @@ runs_sfsac/<env>/<method>/seed_<n>/
 
 `latest.pt`는 actor와 twin critics를 포함한 **inference checkpoint**입니다.
 optimizer/replay/environment state는 없으므로 정확한 학습 재개용은 아닙니다.
-기존 SF Double-Q checkpoint와 호환되지 않으며 evaluate.py가 이를 검사합니다.
+새 3D feature 모델은 기존 2D 모델 checkpoint를 이어 학습할 수 없습니다. `evaluate.py`는
+이전 2D checkpoint를 공식 2D 보상 방식으로 계속 평가합니다.
 `plot.py` 음영은 seed 간 standard error입니다.
 
-Minecart의 sparse ore return이나 locomotion exploration이 해결됐다는 보장은 없습니다.
 현재 배포 검증은 수학적 일관성과 실제 학습 경로 실행 검사이며, 장기 수렴·D-LEVER 성능 우위는
 실험으로 확인해야 합니다. 상세 결과는 `VALIDATION.md`에 기록했습니다.
 
 ## 공식 참고
 
-- https://mo-gymnasium.farama.org/environments/fruit-tree/
-- https://mo-gymnasium.farama.org/environments/minecart/
 - https://mo-gymnasium.farama.org/environments/mo-hopper/
 - https://mo-gymnasium.farama.org/environments/mo-ant/
 - https://spinningup.openai.com/en/latest/algorithms/sac.html

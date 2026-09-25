@@ -22,7 +22,12 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     saved = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
-    cfg = Config(**saved["config"])
+    # Older Ant/Hopper checkpoints may contain retired environment-only fields.
+    saved_config = dict(saved["config"])
+    if "reward_layout" not in saved_config:
+        saved_config["reward_layout"] = "official_2d"
+    cfg = Config(**{key: value for key, value in saved_config.items()
+                    if key in Config.__dataclass_fields__})
     cfg.device, cfg.eval_tasks, cfg.eval_episodes = args.device, args.tasks, args.episodes
     cfg.eval_seed = args.seed
     cfg.resolve()

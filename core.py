@@ -26,15 +26,15 @@ def isolated_torch_rng(seed, device):
 
 
 def sample_latents(rng, count, dim, prior, radius=1.0):
+    if prior.startswith("fixed_common_"):
+        if dim < 2:
+            raise ValueError("A fixed-common task needs at least two reward features")
+        directions = sample_latents(rng, count, dim - 1,
+                                    prior.removeprefix("fixed_common_"), radius)
+        return np.concatenate((directions, np.ones((count, 1), np.float32)), axis=1)
     if prior == "simplex":
         return rng.dirichlet(np.ones(dim), count).astype(np.float32) * radius
     z = rng.normal(size=(count, dim))
-    if prior == "half_normal_simplex":
-        # Fruit Tree's original preference law: half-normal directions with
-        # constant L1 mass.  ``radius`` is the common sum of the weights.
-        z = np.abs(z)
-        z /= np.maximum(z.sum(axis=1, keepdims=True), 1e-12)
-        return (radius * z).astype(np.float32)
     if prior == "positive_sphere":
         z = np.abs(z)
     elif prior != "sphere":

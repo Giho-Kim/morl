@@ -22,10 +22,10 @@ from envs import Benchmark, REWARD_DIMS, SPECS, isolated_global_rng
 
 @dataclass
 class Config:
-    env: str = "fruit_tree"
+    env: str = "mo_ant"
     method: str = "d"
     seed: int = 0
-    depth: int = 6
+    reward_layout: str = "directional_common_3d"
     horizon: int | None = None
     steps: int | None = None
     prior: str | None = None
@@ -58,12 +58,20 @@ class Config:
     output: str = "runs"
 
     def resolve(self):
+        if self.reward_layout not in ("directional_common_3d", "official_2d"):
+            raise ValueError("Invalid reward layout")
         if self.steps is None:
             self.steps = SPECS[self.env][3]
         if self.prior is None:
-            self.prior = SPECS[self.env][2]
+            self.prior = (SPECS[self.env][2] if self.reward_layout == "directional_common_3d"
+                          else "simplex")
+        if self.reward_layout == "directional_common_3d" and not self.prior.startswith("fixed_common_"):
+            self.prior = "fixed_common_" + self.prior
+        if self.reward_layout == "official_2d" and self.prior.startswith("fixed_common_"):
+            raise ValueError("The legacy 2D reward layout cannot use a fixed-common prior")
         if self.radius is None:
-            self.radius = float(np.sqrt(REWARD_DIMS[self.env]))
+            self.radius = (1.0 if self.reward_layout == "directional_common_3d"
+                           else float(np.sqrt(2)))
         if self.eval_tasks is None:
             self.eval_tasks = 10 if self.env == "mo_ant" else 20
         if self.device == "auto":
@@ -81,8 +89,6 @@ class Config:
             raise ValueError("Invalid probability, discount, EMA or exploration settings")
         if self.learning_starts < 0 or (self.horizon is not None and self.horizon < 1):
             raise ValueError("Invalid warmup or horizon")
-        if self.env == "fruit_tree" and self.horizon is not None and self.horizon < self.depth:
-            raise ValueError("Fruit Tree horizon must allow reaching a leaf")
         return self
 
 
@@ -92,7 +98,7 @@ def tensor(x, device):
 
 def initial_bank(cfg):
     with isolated_global_rng(cfg.eval_seed + 777):
-        env = Benchmark(cfg.env, cfg.depth, cfg.horizon)
+        env = Benchmark(cfg.env, cfg.horizon, cfg.reward_layout)
         states = [env.reset(seed=cfg.eval_seed + 777 + j)[0] for j in range(cfg.start_samples)]
         env.close()
     return np.stack(states)
@@ -136,11 +142,10 @@ def evaluate(net, cfg, tasks, starts):
     """Deterministic policy evaluation on fixed tasks; no test-task updates."""
     device = next(net.parameters()).device
     returns = np.zeros((len(tasks), cfg.eval_episodes, net.dim), np.float64)
-    terminal_ids = np.full((len(tasks), cfg.eval_episodes), -1, np.int64)
     lengths = np.zeros((len(tasks), cfg.eval_episodes), np.int64)
     endings = np.zeros((len(tasks), cfg.eval_episodes), bool)
     with isolated_global_rng(cfg.eval_seed), isolated_torch_rng(cfg.eval_seed, device):
-        env = Benchmark(cfg.env, cfg.depth, cfg.horizon)
+        env = Benchmark(cfg.env, cfg.horizon, cfg.reward_layout)
         for j, z in enumerate(tasks):
             zt = tensor(z[None], device)
             for k in range(cfg.eval_episodes):
@@ -153,13 +158,11 @@ def evaluate(net, cfg, tasks, starts):
                         action_tensor = net.act(tensor(obs[None], device), zt,
                                                 deterministic=True)
                         action = action_tensor.item() if net.discrete else action_tensor[0].cpu().numpy()
-                        obs, reward, terminated, truncated, info = env.step(action)
+                        obs, reward, terminated, truncated, _ = env.step(action)
                         returns[j, k] += cfg.gamma ** t * reward
                         if terminated or truncated:
                             lengths[j, k] = t + 1
                             endings[j, k] = terminated
-                            if cfg.env == "fruit_tree" and terminated:
-                                terminal_ids[j, k] = int(info["raw_state"][1])
                             break
         env.close()
     utility = np.einsum("nd,nkd->nk", tasks, returns)
@@ -183,11 +186,9 @@ def evaluate(net, cfg, tasks, starts):
                    mean_episode_length=float(lengths.mean()),
                    timeout_fraction=float(1 - endings.mean()),
                    eval_transitions=int(lengths.sum()))
-    if cfg.env == "fruit_tree":
-        metrics["unique_leaves"] = int(len(np.unique(terminal_ids[terminal_ids >= 0])))
     arrays = dict(tasks=tasks, returns=returns, utilities=utility,
                   utility_iqm=utility_iqm, measured_mu=measured,
-                  predicted_mu=predicted, lengths=lengths, terminal_ids=terminal_ids)
+                  predicted_mu=predicted, lengths=lengths)
     return metrics, arrays
 
 
@@ -213,7 +214,7 @@ def train(cfg):
     versions = {p: importlib.metadata.version(p) for p in
                 ("numpy", "torch", "mo-gymnasium", "gymnasium", "mujoco")}
     (directory / "versions.json").write_text(json.dumps(versions, indent=2))
-    env = Benchmark(cfg.env, cfg.depth, cfg.horizon)
+    env = Benchmark(cfg.env, cfg.horizon, cfg.reward_layout)
     online = make_model(cfg, env)
     target_entropy = (.98 * math.log(env.actions) if env.discrete else -float(env.actions))
     log_temperature = torch.tensor(math.log(cfg.temperature), dtype=torch.float32,
@@ -324,10 +325,11 @@ def train(cfg):
 
 def parse_config():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env", choices=SPECS, default="fruit_tree")
+    parser.add_argument("--env", choices=SPECS, default="mo_ant")
     parser.add_argument("--method", choices=("uniform", "d", "a", "e", "td"), default="d")
-    parser.add_argument("--prior", choices=("sphere", "positive_sphere",
-                                             "half_normal_simplex", "simplex"))
+    parser.add_argument("--prior", choices=("sphere", "positive_sphere", "simplex",
+                                             "fixed_common_sphere", "fixed_common_positive_sphere",
+                                             "fixed_common_simplex"))
     defaults = Config()
     for name in Config.__dataclass_fields__:
         if name in ("env", "method", "prior"):

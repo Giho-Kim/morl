@@ -226,11 +226,10 @@ def test_td_curriculum_uses_td_scores_and_mixture():
     assert torch.all(curriculum.probs >= .25 / 8)
 
 
-@pytest.mark.parametrize("prior", ["sphere", "positive_sphere",
-                                    "half_normal_simplex", "simplex"])
+@pytest.mark.parametrize("prior", ["sphere", "positive_sphere", "simplex"])
 def test_latent_domains(prior):
     z = sample_latents(np.random.default_rng(1), 100, 6, prior)
-    if prior in ("simplex", "half_normal_simplex"):
+    if prior == "simplex":
         assert np.allclose(z.sum(1), 1)
     else:
         assert np.allclose(np.linalg.norm(z, axis=1), 1)
@@ -238,23 +237,7 @@ def test_latent_domains(prior):
         assert (z >= 0).all()
 
 
-def test_fruit_tree_uses_scaled_original_half_normal_preferences():
-    from train import Config, evaluation_tasks
-    cfg = Config(env="fruit_tree", device="cpu").resolve()
-    assert cfg.prior == "half_normal_simplex"
-    assert cfg.radius == pytest.approx(np.sqrt(6))
-    rng_a, rng_b = np.random.default_rng(17), np.random.default_rng(17)
-    actual = sample_latents(rng_a, 100, 6, cfg.prior, cfg.radius)
-    raw = np.abs(rng_b.normal(size=(100, 6)))
-    expected = cfg.radius * raw / raw.sum(axis=1, keepdims=True)
-    assert np.allclose(actual, expected)
-    assert np.allclose(actual.sum(1), cfg.radius)
-    first, second = evaluation_tasks(cfg, 6), evaluation_tasks(cfg, 6)
-    assert np.array_equal(first, second)
-    assert np.allclose(first.sum(1), cfg.radius)
-
-
-@pytest.mark.parametrize("name", ["fruit_tree", "minecart", "mo_hopper", "mo_ant"])
+@pytest.mark.parametrize("name", ["mo_hopper", "mo_ant"])
 def test_real_environment_contract_and_timeout(name):
     with isolated_global_rng(5):
         env = Benchmark(name, horizon=8)
@@ -270,8 +253,6 @@ def test_real_environment_contract_and_timeout(name):
             if terminated or truncated:
                 break
         assert terminated or truncated
-        if name == "fruit_tree":
-            assert (total > 0).sum() > 1  # Original nutrients, NOT one-hot leaves.
         env.close()
 
 
@@ -294,36 +275,42 @@ def test_mo_ant_matches_official_vector_reward():
     obs, reward, terminated, truncated, info = benchmark.step(action)
     expected_obs, expected_reward, expected_terminated, expected_truncated, _ = official.step(action)
     assert np.allclose(obs, expected_obs)
-    assert np.array_equal(reward, expected_reward)
+    assert reward.shape == (3,)
+    assert np.allclose(reward[:2] + reward[2], expected_reward, atol=1e-6)
     shared = info["reward_ctrl"] + info["reward_survive"] + info["reward_contact"]
-    assert reward[0] == pytest.approx(info["x_velocity"] + shared)
-    assert reward[1] == pytest.approx(info["y_velocity"] + shared)
+    assert reward[0] == pytest.approx(info["x_velocity"])
+    assert reward[1] == pytest.approx(info["y_velocity"])
+    assert reward[2] == pytest.approx(shared)
+    assert np.dot(reward, [1., 0., 1.]) == pytest.approx(expected_reward[0])
+    assert np.dot(reward, [0., 1., 1.]) == pytest.approx(expected_reward[1])
     assert terminated == expected_terminated
     assert truncated == expected_truncated
     benchmark.close()
     official.close()
 
 
-@pytest.mark.parametrize("env", ["minecart", "mo_hopper", "mo_ant"])
-def test_benchmarks_use_sqrt_d_simplex_preferences_by_default(env):
+@pytest.mark.parametrize("env", ["mo_hopper", "mo_ant"])
+def test_benchmarks_use_unit_positive_sphere_with_fixed_common_weight(env):
     from train import Config, evaluation_tasks
-    dim = 2 if env in ("mo_hopper", "mo_ant") else 3
+    dim = 3
     cfg = Config(env=env, device="cpu").resolve()
-    assert cfg.prior == "simplex"
-    assert cfg.radius == pytest.approx(np.sqrt(dim))
+    assert cfg.prior == "fixed_common_positive_sphere"
+    assert cfg.radius == pytest.approx(1.)
     z = sample_latents(np.random.default_rng(3), 100, dim, cfg.prior, cfg.radius)
     assert (z >= 0).all()
-    assert np.allclose(z.sum(1), cfg.radius)
+    assert np.allclose(np.linalg.norm(z[:, :2], axis=1), 1)
+    assert np.array_equal(z[:, 2], np.ones(100))
     first = evaluation_tasks(cfg, dim)
     second = evaluation_tasks(cfg, dim)
     assert first.shape == (10 if env == "mo_ant" else 20, dim)
     assert np.array_equal(first, second)
     if env == "mo_ant":
-        expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 2,
+        expected = sample_latents(np.random.default_rng(cfg.eval_seed), 10, 3,
                                   cfg.prior, cfg.radius)
         assert np.array_equal(first, expected)
     assert (first >= 0).all()
-    assert np.allclose(first.sum(1), cfg.radius)
+    assert np.allclose(np.linalg.norm(first[:, :2], axis=1), 1)
+    assert np.array_equal(first[:, 2], np.ones(len(first)))
 
 
 def test_mo_hopper_matches_official_two_objective_reward():
@@ -336,10 +323,14 @@ def test_mo_hopper_matches_official_two_objective_reward():
     obs, reward, terminated, truncated, _ = benchmark.step(action)
     expected_obs, expected_reward, expected_terminated, expected_truncated, info = official.step(action)
     assert np.allclose(obs, expected_obs)
-    assert np.array_equal(reward, expected_reward)
+    assert reward.shape == (3,)
+    assert np.allclose(reward[:2] + reward[2], expected_reward, atol=1e-6)
     shared = info["reward_ctrl"] + info["reward_survive"]
-    assert reward[0] == pytest.approx(info["x_velocity"] + shared)
-    assert reward[1] == pytest.approx(10 * info["z_distance_from_origin"] + shared)
+    assert reward[0] == pytest.approx(info["x_velocity"])
+    assert reward[1] == pytest.approx(10 * info["z_distance_from_origin"])
+    assert reward[2] == pytest.approx(shared)
+    assert np.dot(reward, [1., 0., 1.]) == pytest.approx(expected_reward[0])
+    assert np.dot(reward, [0., 1., 1.]) == pytest.approx(expected_reward[1])
     assert terminated == expected_terminated
     assert truncated == expected_truncated
     benchmark.close()
@@ -364,7 +355,23 @@ def test_tilted_behavior_uses_existing_cache_only():
     curriculum.z = None
     fallback = behavior_task(cfg, np.random.default_rng(9), 3, curriculum)
     assert (fallback >= 0).all()
-    assert fallback.sum() == pytest.approx(cfg.radius)
+    assert np.linalg.norm(fallback[:2]) == pytest.approx(cfg.radius)
+    assert fallback[2] == pytest.approx(1.)
+
+
+def test_legacy_two_dimensional_checkpoint_config_and_reward_remain_supported():
+    from train import Config, evaluation_tasks
+    cfg = Config(env="mo_ant", reward_layout="official_2d", prior="simplex",
+                 radius=np.sqrt(2), device="cpu").resolve()
+    assert evaluation_tasks(cfg, 2).shape == (10, 2)
+    env = Benchmark("mo_ant", horizon=2, reward_layout=cfg.reward_layout)
+    env.reset(seed=17)
+    _, reward, _, _, info = env.step(np.zeros(env.actions, np.float32))
+    assert reward.shape == (2,)
+    shared = info["reward_ctrl"] + info["reward_survive"] + info["reward_contact"]
+    assert reward[0] == pytest.approx(info["x_velocity"] + shared)
+    assert reward[1] == pytest.approx(info["y_velocity"] + shared)
+    env.close()
 
 
 def test_iqm_of_ten_rollouts_averages_central_six():
@@ -375,7 +382,7 @@ def test_iqm_of_ten_rollouts_averages_central_six():
 
 def test_evaluation_preserves_rng_and_repeats():
     from train import Config, evaluate, initial_bank, make_model
-    cfg = Config(env="minecart", horizon=10, eval_tasks=10, eval_episodes=1,
+    cfg = Config(env="mo_hopper", horizon=10, eval_tasks=10, eval_episodes=1,
                  hidden=8, steps=10, device="cpu").resolve()
     with isolated_global_rng(20):
         env = Benchmark(cfg.env, horizon=cfg.horizon)
@@ -410,7 +417,7 @@ def test_safe_checkpoint_roundtrip(tmp_path):
     from dataclasses import asdict
     from train import Config, make_model
     cfg = Config(steps=10, hidden=8, device="cpu").resolve()
-    env = Benchmark("fruit_tree")
+    env = Benchmark("mo_hopper")
     model = make_model(cfg, env)
     path = tmp_path / "model.pt"
     torch.save(dict(model=model.state_dict(), config=asdict(cfg), obs_dim=env.obs_dim,
