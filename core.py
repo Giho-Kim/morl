@@ -367,8 +367,6 @@ def learner_step(online, target_critics, critic_optimizer, actor_optimizer,
         sf_loss = sf_loss + F.mse_loss(psi, wanted_sf)
         h_loss = h_loss + F.mse_loss(h, wanted_h)
     loss = sf_loss + online.temperature ** 2 * h_loss
-    if not torch.isfinite(loss):
-        raise FloatingPointError("Non-finite critic loss")
     critic_optimizer.zero_grad(set_to_none=True)
     loss.backward()
     grad = nn.utils.clip_grad_norm_(online.critics.parameters(), 10.)
@@ -385,8 +383,6 @@ def learner_step(online, target_critics, critic_optimizer, actor_optimizer,
             qs = [online.q(*c(obs, z, action), z) for c in online.critics]
             actor_loss = (online.temperature * logp - torch.minimum(*qs)).mean()
             entropy = -logp.mean()
-        if not torch.isfinite(actor_loss):
-            raise FloatingPointError("Non-finite actor loss")
         actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
         nn.utils.clip_grad_norm_(online.actor.parameters(), 10.)
@@ -396,8 +392,10 @@ def learner_step(online, target_critics, critic_optimizer, actor_optimizer,
     with torch.no_grad():
         for p, q in zip(online.critics.parameters(), target_critics.parameters()):
             q.lerp_(p, tau)
-    return dict(sf_td_loss=sf_loss.item(), entropy_td_loss=h_loss.item(),
-                actor_loss=actor_loss.item(), policy_entropy=entropy.item(), grad_norm=float(grad))
+    # Device tensors: no host sync per update. check_finite() converts them at logging time.
+    return dict(sf_td_loss=sf_loss.detach(), entropy_td_loss=h_loss.detach(),
+                actor_loss=actor_loss.detach(), policy_entropy=entropy.detach(),
+                grad_norm=grad.detach())
 
 
 def temperature_step(online, optimizer, log_temperature, obs, z, target_entropy):
@@ -411,14 +409,19 @@ def temperature_step(online, optimizer, log_temperature, obs, z, target_entropy)
             entropy = -logp
         entropy_error = entropy - target_entropy
     loss = (log_temperature * entropy_error).mean()
-    if not torch.isfinite(loss):
-        raise FloatingPointError("Non-finite temperature loss")
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    temperature = log_temperature.detach().exp()
-    if not torch.isfinite(temperature):
-        raise FloatingPointError("Non-finite temperature")
-    online.temperature = temperature.item()
-    return dict(temperature=online.temperature, temperature_loss=loss.item(),
+    # Kept on device (0-d tensor) so the next update needs no host round trip.
+    online.temperature = log_temperature.detach().exp()
+    return dict(temperature=online.temperature, temperature_loss=loss.detach(),
                 target_entropy=float(target_entropy))
+
+
+def check_finite(metrics):
+    """Convert learner metrics to floats (one host sync) and fail on NaN/inf."""
+    values = {k: float(v) for k, v in metrics.items()}
+    bad = [k for k, v in values.items() if not math.isfinite(v)]
+    if bad:
+        raise FloatingPointError(f"Non-finite training metrics: {bad}")
+    return values

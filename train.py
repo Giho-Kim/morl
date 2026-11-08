@@ -16,7 +16,7 @@ import torch
 from pymoo.util.ref_dirs import get_reference_directions
 from tqdm.auto import tqdm
 
-from core import (Curriculum, Replay, SFSAC, isolated_torch_rng, embeddings, learner_step,
+from core import (Curriculum, Replay, SFSAC, check_finite, isolated_torch_rng, embeddings, learner_step,
                   sample_latents, temperature_step)
 from envs import Benchmark, REWARD_DIMS, SPECS, isolated_global_rng
 
@@ -60,6 +60,7 @@ class Config:
     wandb: bool = True
     wandb_project: str = "DLEVER_MUJOCO"
     wandb_entity: str = "chicioue512-seoul-national-university"
+    compile: str = "none"  # none | default | reduce-overhead | max-autotune-no-cudagraphs
 
     def resolve(self):
         if self.reward_layout not in ("directional_common_3d", "official_2d"):
@@ -298,6 +299,12 @@ def train(cfg):
                             cfg.ridge, cfg.alpha, cfg.refresh, cfg.radius,
                             cfg.embedding_action_samples, cfg.seed + 17000,
                             cfg.td_probes)
+    if cfg.compile != "none":
+        # Compile each MLP in place, after every deepcopy; state_dict keys are unchanged.
+        for module in (online, target, curriculum.scorer, curriculum.target_scorer):
+            for sub in module.modules():
+                if isinstance(sub, torch.nn.Sequential):
+                    sub.compile(mode=None if cfg.compile == "default" else cfg.compile, dynamic=False)
     tasks = evaluation_tasks(cfg, env.dim)
     np.save(directory / "eval_tasks.npy", tasks)
     np.save(directory / "initial_states.npy", starts)
@@ -321,7 +328,7 @@ def train(cfg):
         metrics.update(env_steps=step, updates=updates, episodes=episode,
                        training_seconds=training_seconds,
                        cumulative_eval_transitions=total_eval_steps,
-                       **learner_metrics)
+                       **check_finite(learner_metrics))
         metrics.update({k: curriculum.stats.get(k, 0.) for k in
                         ("train_logdet", "mean_leverage", "adaptive_ridge", "sampling_ess",
                          "mean_td_error")})
@@ -345,7 +352,7 @@ def train(cfg):
                 gram=curriculum.gram.cpu().numpy())
         # Inference checkpoint, not an exact training-resume snapshot.
         torch.save(dict(config=asdict(cfg), model=online.state_dict(), steps=step,
-                        temperature=online.temperature, target_entropy=target_entropy,
+                        temperature=float(online.temperature), target_entropy=target_entropy,
                         obs_dim=env.obs_dim, actions=env.actions, dim=env.dim,
                         discrete=env.discrete,
                         low=None if env.discrete else env.low.tolist(),
