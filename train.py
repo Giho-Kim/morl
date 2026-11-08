@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import random
+import shutil
 import time
 
 import numpy as np
@@ -219,6 +220,49 @@ def init_wandb(cfg, directory):
         return None
 
 
+def wandb_upload_step(run, cfg, directory, step):
+    """Version every evaluation as one W&B artifact with the eval/design arrays (no weights)."""
+    if run is None:
+        return
+    try:
+        import wandb
+        artifact = wandb.Artifact(f"{cfg.env}_{cfg.method}_seed_{cfg.seed}_eval", type="evaluation",
+                                  metadata=dict(env_steps=step, env=cfg.env, method=cfg.method,
+                                                seed=cfg.seed))
+        for prefix in ("eval", "design"):
+            path = directory / f"{prefix}_{step:09d}.npz"
+            if path.exists():
+                artifact.add_file(str(path), name=f"{prefix}.npz")
+        run.log_artifact(artifact, aliases=[f"step_{step}"])
+    except Exception as error:  # noqa: BLE001
+        print(f"[wandb] artifact upload failed at step {step}: {error}", flush=True)
+
+
+def wandb_upload_files(run, cfg, directory):
+    """Run-level files (config, versions, metrics, eval tasks, start states) and the final policy."""
+    if run is None:
+        return
+    try:
+        import wandb
+        if (directory / "latest.pt").exists():
+            step = int(torch.load(directory / "latest.pt", map_location="cpu",
+                                  weights_only=False)["steps"])
+            model = wandb.Artifact(f"{cfg.env}_{cfg.method}_seed_{cfg.seed}_policy", type="model",
+                                   metadata=dict(env_steps=step, env=cfg.env, method=cfg.method,
+                                                 seed=cfg.seed))
+            model.add_file(str(directory / "latest.pt"), name="policy.pt")
+            run.log_artifact(model, aliases=[f"step_{step}", "final"])
+    except Exception as error:  # noqa: BLE001
+        print(f"[wandb] final policy upload failed: {error}", flush=True)
+    for name in ("config.json", "versions.json", "metrics.csv", "eval_tasks.npy",
+                 "initial_states.npy"):
+        try:
+            if (directory / name).exists():
+                run.save(str(directory / name), base_path=str(directory), policy="now")
+        except Exception as error:  # noqa: BLE001
+            print(f"[wandb] save {name} failed: {error}", flush=True)
+
+
 def train(cfg):
     cfg.resolve()
     torch.set_num_threads(cfg.threads)
@@ -306,7 +350,10 @@ def train(cfg):
                         low=None if env.discrete else env.low.tolist(),
                         high=None if env.discrete else env.high.tolist(),
                         algorithm="conditional_sf_sac_v2_auto_temperature"),
-                   directory / "latest.pt")
+                   directory / f"policy_{step:09d}.pt")
+        # Keep every evaluated policy locally; latest.pt stays the most recent one.
+        shutil.copyfile(directory / f"policy_{step:09d}.pt", directory / "latest.pt")
+        wandb_upload_step(wandb_run, cfg, directory, step)
         progress.write(json.dumps(dict(env=cfg.env, method=cfg.method, seed=cfg.seed,
                                        **metrics)))
         progress.set_postfix(stage="training", updates=updates, episodes=episode,
@@ -348,6 +395,7 @@ def train(cfg):
     finally:
         progress.close()
         env.close()
+        wandb_upload_files(wandb_run, cfg, directory)
         if wandb_run is not None:
             try:
                 done = (directory / f"eval_{cfg.steps:09d}.npz").exists()
