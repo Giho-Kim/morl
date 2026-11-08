@@ -56,6 +56,9 @@ class Config:
     device: str = "auto"
     threads: int = 1
     output: str = "runs"
+    wandb: bool = True
+    wandb_project: str = "DLEVER_MUJOCO"
+    wandb_entity: str = "chicioue512-seoul-national-university"
 
     def resolve(self):
         if self.reward_layout not in ("directional_common_3d", "official_2d"):
@@ -197,6 +200,25 @@ def make_model(cfg, env):
                  env.low, env.high, cfg.temperature).to(cfg.device)
 
 
+def init_wandb(cfg, directory):
+    """Optional W&B mirror of metrics.csv; a W&B failure never stops training."""
+    if not cfg.wandb:
+        return None
+    try:
+        import wandb
+        run = wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project,
+                         name=f"{cfg.env}_{cfg.method}_seed_{cfg.seed}",
+                         group=f"{cfg.env}_{cfg.method}", job_type=cfg.method,
+                         tags=[cfg.env, cfg.method, "running"], dir=str(directory),
+                         config={**asdict(cfg), "source_dir": str(directory.resolve())})
+        run.define_metric("env_steps")
+        run.define_metric("*", step_metric="env_steps")
+        return run
+    except Exception as error:  # noqa: BLE001
+        print(f"[wandb] disabled: {error}", flush=True)
+        return None
+
+
 def train(cfg):
     cfg.resolve()
     torch.set_num_threads(cfg.threads)
@@ -214,6 +236,7 @@ def train(cfg):
     versions = {p: importlib.metadata.version(p) for p in
                 ("numpy", "torch", "mo-gymnasium", "gymnasium", "mujoco")}
     (directory / "versions.json").write_text(json.dumps(versions, indent=2))
+    wandb_run = init_wandb(cfg, directory)
     env = Benchmark(cfg.env, cfg.horizon, cfg.reward_layout)
     online = make_model(cfg, env)
     target_entropy = (.98 * math.log(env.actions) if env.discrete else -float(env.actions))
@@ -264,6 +287,11 @@ def train(cfg):
             if step == 0:
                 writer.writeheader()
             writer.writerow(metrics)
+        if wandb_run is not None:
+            try:
+                wandb_run.log({k: float(v) for k, v in metrics.items()})
+            except Exception as error:  # noqa: BLE001
+                print(f"[wandb] log failed at step {step}: {error}", flush=True)
         np.savez_compressed(directory / f"eval_{step:09d}.npz", **arrays)
         if curriculum.z is not None:
             np.savez_compressed(directory / f"design_{step:09d}.npz",
@@ -320,6 +348,14 @@ def train(cfg):
     finally:
         progress.close()
         env.close()
+        if wandb_run is not None:
+            try:
+                done = (directory / f"eval_{cfg.steps:09d}.npz").exists()
+                wandb_run.tags = [cfg.env, cfg.method, "complete" if done else "incomplete"]
+                wandb_run.summary["status"] = "complete" if done else "incomplete"
+                wandb_run.finish(exit_code=0 if done else 1)
+            except Exception as error:  # noqa: BLE001
+                print(f"[wandb] finish failed: {error}", flush=True)
     return directory
 
 
