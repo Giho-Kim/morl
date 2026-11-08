@@ -326,7 +326,7 @@ def train(cfg):
 def parse_config():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", choices=SPECS, default="mo_ant")
-    parser.add_argument("--method", choices=("uniform", "d", "a", "e", "td"), default="d")
+    parser.add_argument("--method", choices=("uniform", "d", "a", "e", "td", "norm"), default="d")
     parser.add_argument("--prior", choices=("sphere", "positive_sphere", "simplex",
                                              "fixed_common_sphere", "fixed_common_positive_sphere",
                                              "fixed_common_simplex"))

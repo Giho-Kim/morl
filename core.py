@@ -157,6 +157,10 @@ def design_scores(mu, gram, method):
         score = lev
     elif method == "a":
         score = solved.square().sum(-1) / (1 + lev)
+    elif method == "norm":
+        # Ablation: drop the G^-1 direction term and keep only ||mu||^2
+        # (lev = ||mu||^2 * u^T G^-1 u with u = mu/||mu||).
+        score = mu.square().sum(-1)
     elif method == "e":
         base = torch.linalg.eigvalsh(gram)[0]
         score = torch.linalg.eigvalsh(gram[None] + mu[:, :, None] * mu[:, None, :])[:, 0] - base

@@ -11,8 +11,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 SPECS = {
-    "mo_hopper": ("mo-hopper-2obj-v5", 1000, "fixed_common_positive_sphere", 1_000_000),
-    "mo_ant": ("mo-ant-2obj-v5", 1000, "fixed_common_positive_sphere", 1_000_000),
+    "mo_hopper": ("mo-hopper-2obj-v5", 1000, "fixed_common_positive_sphere", 2_000_000),
+    "mo_ant": ("mo-ant-2obj-v5", 1000, "fixed_common_positive_sphere", 2_000_000),
 }
 
 REWARD_DIMS = {"mo_hopper": 3, "mo_ant": 3}

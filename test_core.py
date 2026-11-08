@@ -438,3 +438,11 @@ def test_continuous_embedding_rng_isolation_and_reproducibility():
     a = embeddings(net, starts, z)
     assert torch.equal(state, torch.get_rng_state())
     assert torch.equal(a, embeddings(net, starts, z))
+
+
+def test_norm_scores_are_squared_embedding_norms():
+    mu = torch.randn(7, 3, dtype=torch.float64)
+    gram = torch.eye(3, dtype=torch.float64) * 2 + .1
+    score, lev = design_scores(mu, gram, "norm")
+    assert torch.allclose(score, mu.square().sum(-1))
+    assert torch.allclose(lev, design_scores(mu, gram, "d")[0])
