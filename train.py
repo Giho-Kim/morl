@@ -290,7 +290,8 @@ def train(cfg):
     critic_optimizer = torch.optim.Adam(online.critics.parameters(), lr=cfg.lr)
     actor_optimizer = torch.optim.Adam(online.actor.parameters(), lr=cfg.lr)
     temperature_optimizer = torch.optim.Adam([log_temperature], lr=cfg.lr)
-    replay = Replay(cfg.replay_size, env.obs_dim, env.dim, env.actions, env.discrete)
+    replay = Replay(cfg.replay_size, env.obs_dim, env.dim, env.actions, env.discrete,
+                    device=cfg.device)
     starts = initial_bank(cfg)
     curriculum = Curriculum(online, tensor(starts, cfg.device), design_rng, cfg.method,
                             cfg.prior, cfg.batch_size, cfg.multiplier, cfg.eta,

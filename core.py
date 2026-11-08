@@ -64,7 +64,7 @@ class Actor(nn.Module):
             logp = output.log_softmax(-1)
             return logp.exp(), logp
         mean, logstd = output.chunk(2, -1)
-        return torch.distributions.Normal(mean, logstd.clamp(-5, 2).exp())
+        return torch.distributions.Normal(mean, logstd.clamp(-5, 2).exp(), validate_args=False)
 
     def sample(self, obs, z, deterministic=False):
         if self.discrete:
@@ -240,7 +240,16 @@ class Curriculum:
         self.action_samples, self.score_seed = action_samples, score_seed
         self.td_probes = td_probes
         self.gram = self.z = self.probs = None
+        self._probs_ref = self._probs_np = None
         self.stats = {}
+
+    def _numpy_probs(self):
+        """Host copy of self.probs, refreshed only when the tensor object changes."""
+        if self.probs is not self._probs_ref:
+            probs = self.probs.detach().cpu().numpy().astype(np.float64)
+            self._probs_np = probs / probs.sum() if probs.sum() > 0 else None
+            self._probs_ref = self.probs
+        return self._probs_np
 
     @torch.no_grad()
     def sample(self, net, update, batch=None, target_critics=None, gamma=.99):
@@ -276,24 +285,28 @@ class Curriculum:
                               sampling_ess=(1 / self.probs.square().sum()).item(),
                               mean_td_error=(self.scores.mean().item()
                                              if self.method == "td" else 0.))
-        probs = self.probs.detach().cpu().numpy().astype(np.float64)
-        probs = probs / probs.sum() if probs.sum() > 0 else None
-        index = self.rng.choice(len(self.z), self.batch_size, replace=False, p=probs)
+        index = self.rng.choice(len(self.z), self.batch_size, replace=False, p=self._numpy_probs())
         return self.z[torch.as_tensor(index, device=self.z.device)].detach()
 
     def sample_behavior(self, rng):
         """Draw one cached task independently across episodes."""
         if self.z is None:
             return None
-        probs = self.probs.detach().cpu().numpy().astype(np.float64)
-        probs = probs / probs.sum() if probs.sum() > 0 else None
-        index = rng.choice(len(self.z), p=probs)
+        index = rng.choice(len(self.z), p=self._numpy_probs())
         return self.z[index].detach().cpu().numpy().copy()
 
 
 class Replay:
-    def __init__(self, capacity, obs_dim, dim, actions=1, discrete=True):
+    """FIFO replay. With a device, every transition is mirrored once into a packed
+    device tensor and batches are gathered there (same indices, same values)."""
+
+    def __init__(self, capacity, obs_dim, dim, actions=1, discrete=True, device=None):
         self.capacity, self.pos, self.size = capacity, 0, 0
+        self.discrete = discrete
+        widths = (obs_dim, 1 if discrete else actions, dim, obs_dim, 1)
+        self.slices = np.cumsum((0,) + widths)
+        self.packed = (torch.empty(capacity, int(self.slices[-1]), dtype=torch.float32,
+                                   device=device) if device is not None else None)
         self.obs = np.empty((capacity, obs_dim), np.float32)
         self.next_obs = np.empty_like(self.obs)
         self.reward = np.empty((capacity, dim), np.float32)
@@ -305,13 +318,24 @@ class Replay:
         i = self.pos
         self.obs[i], self.action[i], self.reward[i] = obs, action, reward
         self.next_obs[i], self.terminal[i] = next_obs, terminal
+        if self.packed is not None:
+            row = np.concatenate([np.ravel(self.obs[i]), np.ravel(self.action[i]).astype(np.float32),
+                                  np.ravel(self.reward[i]), np.ravel(self.next_obs[i]),
+                                  np.ravel(self.terminal[i])]).astype(np.float32)
+            self.packed[i].copy_(torch.from_numpy(row), non_blocking=False)
         self.pos = (i + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, rng, batch, device):
         i = rng.integers(self.size, size=batch)
-        return tuple(torch.as_tensor(x[i], device=device) for x in
-                     (self.obs, self.action, self.reward, self.next_obs, self.terminal))
+        if self.packed is None or self.packed.device != torch.device(device):
+            return tuple(torch.as_tensor(x[i], device=device) for x in
+                         (self.obs, self.action, self.reward, self.next_obs, self.terminal))
+        rows = self.packed[torch.as_tensor(i, device=self.packed.device)]
+        a, b = self.slices, rows
+        obs, action, reward, next_obs, terminal = (b[:, a[k]:a[k + 1]] for k in range(5))
+        action = action[:, 0].long() if self.discrete else action
+        return obs, action, reward, next_obs, terminal[:, 0]
 
 
 @torch.no_grad()
