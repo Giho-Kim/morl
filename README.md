@@ -38,6 +38,7 @@ python run_suite.py --seeds 0 1 2 3 4 --output runs_sfsac
 개별 실행 / 추가 ablation:
 
 ```bash
+python train.py --env mo_hopper --method norm --seed 3 --steps 3000000 --output runs_3m --ridge 0.01 --device cuda
 python train.py --env mo_ant --method d --seed 0 --output ant_runs
 python run_suite.py --methods uniform d a e td --seeds 0 1 2 3 4 --output all_methods
 python run_suite.py --methods uniform d --seeds 0 --steps 20000 --learning-starts 1000 --eval-every 10000 --output pilot
