@@ -18,7 +18,7 @@ Hopper와 Ant는 공식 2-objective v5 환경입니다.
 ```bash
 conda create -n dlever-sfsac python=3.12 -y
 conda activate dlever-sfsac
-cd dlever_bench
+cd morl
 python -m pip install --upgrade pip
 pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 python -m pip install -r requirements.txt
