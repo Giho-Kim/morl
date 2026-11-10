@@ -20,8 +20,7 @@ conda create -n dlever-sfsac python=3.12 -y
 conda activate dlever-sfsac
 cd dlever_bench
 python -m pip install --upgrade pip
-# CPU 버전. GPU 사용 시 이 줄 대신 해당 시스템에 맞는 PyTorch 2.6.0 설치.
-python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 python -m pip install -r requirements.txt
 python -m pytest -q
 python run_suite.py --smoke --seeds 0 --output smoke_sfsac
